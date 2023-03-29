@@ -1,0 +1,2847 @@
+#include "stdafx.h"
+#include "AV8Buffer.h"
+#include "PlayView.h"
+#include "winsock2.h"
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;	
+#endif
+extern WSABUF stWSABuf;
+extern HWND hWnd;
+CAV8Buffer::CAV8Buffer(DWORD dwBlock, DWORD dwByte)
+{
+//视觉检测管理
+	m_dwBlock = dwBlock;
+	m_dwByte  = dwByte;
+	m_pdwIndex  = (DWORD *)malloc(dwBlock sizeof(DWORD));
+	m_pdwLength = (DWORD *)malloc(dwBlock sizeof(DWORD));	
+	m_pbFull    = (BOOL  *)malloc(dwBlock sizeof(BOOL ));
+	m_plpArray  = (LPSTR *)malloc(dwBlock sizeof(LPSTR));
+	for (DWORD dwIndex = 0; dwIndex < dwBlock; dwIndex++)
+	{
+		m_pdwIndex [dwIndex] = dwIndex;
+		m_pdwLength[dwIndex] = 0;
+		m_pbFull   [dwIndex] = FALSE;
+		m_plpArray [dwIndex] = (LPSTR)malloc(dwByte * sizeof(char));
+	}
+	m_lEmptyBlock = -1;
+	Flag = true;
+}
+CAV8Buffer::~CAV8Buffer()
+{
+	for (DWORD dwIndex = 0; dwIndex < m_dwBlock; dwIndex++)
+		free(m_plpArray[dwIndex]);
+	free(m_pdwIndex);
+	free(m_pdwLength);
+	free(m_pbFull);
+	free(m_plpArray);
+}
+DWORD CAV8Buffer::PushIn(LPSTR lpData, DWORD dwLength)
+{
+	if (m_lEmptyBlock < 0)
+		m_lEmptyBlock = QueryEmpty(); 
+    DWORD dwOldLength = m_pdwLength[m_lEmptyBlock];
+	if (m_lEmptyBlock >= 0 m_plpArray[m_lEmptyBlock])
+	{
+		memcpy((void *)(m_plpArray[m_lEmptyBlock] + dwOldLength), (const void *)lpData, 
+min(dwLength, m_dwByte - dwOldLength));
+		m_pdwLength[m_lEmptyBlock] += min(dwLength, m_dwByte - dwOldLength);
+		if (m_pdwLength[m_lEmptyBlock] == m_dwByte)
+		{
+			m_pbFull[m_lEmptyBlock] = TRUE;
+			OrderAll(m_lEmptyBlock);
+			if(Flag)
+			  ::PostMessage(hWnd,WM_READYSEND,0,0);
+			m_lEmptyBlock = -1;
+		}
+		if (dwLength > m_dwByte - dwOldLength)
+			PushIn(lpData + (m_dwByte - dwOldLength), dwLength - (m_dwByte - 
+dwOldLength));
+			return min(dwLength, m_dwByte - dwOldLength);
+	}
+//视觉检测配置
+	return 0;
+}	
+DWORD CAV8Buffer::PopOut(LPSTR lpData, DWORD dwLength)
+{
+	for (DWORD dwIndex = 0; dwIndex < m_dwBlock; dwIndex++)
+	{
+		DWORD dwPopBlock = m_pdwIndex[dwIndex];
+		DWORD dwOldLength = m_pdwLength[dwPopBlock];
+		if (m_pbFull[dwPopBlock])
+		{
+			memcpy((void )lpData, (const void )m_plpArray[dwPopBlock], min(dwOldLength, 
+dwLength));
+			m_pdwLength[dwPopBlock] = 0;
+			m_pbFull[dwPopBlock] = FALSE;
+			return min(dwOldLength, dwLength);
+		}
+	}	
+	return 0;
+}
+void CAV8Buffer::ClearAll()
+{
+	for (DWORD dwIndex = 0; dwIndex < m_dwBlock; dwIndex++)
+	{
+		m_pdwIndex [dwIndex] = dwIndex;
+		m_pdwLength[dwIndex] = 0;
+		m_pbFull   [dwIndex] = FALSE;
+	}
+}
+LONG CAV8Buffer::QueryEmpty()
+{
+	for (DWORD dwIndex = 0; dwIndex < m_dwBlock; dwIndex++)
+		if (! m_pbFull[dwIndex])
+			return (LONG)dwIndex;
+	return -1;
+}
+void CAV8Buffer::OrderAll(DWORD dwTheLast)
+{
+	for (DWORD dwIndex = 0; dwIndex < m_dwBlock; dwIndex++)
+		if (m_pdwIndex[dwIndex] == dwTheLast)
+				break;
+	for (; dwIndex < m_dwBlock - 1; dwIndex++)
+		m_pdwIndex[dwIndex] = m_pdwIndex[dwIndex + 1];
+	m_pdwIndex[dwIndex] = dwTheLast;
+}
+//计划表单
+IMPLEMENT_DYNCREATE(CMainFrame, CFrameWnd)
+BEGIN_MESSAGE_MAP(CMainFrame, CFrameWnd)
+	ON_WM_CREATE()
+	ON_COMMAND(ID_VIEW_STATUS_BAR, OnViewStatusBar)
+	ON_UPDATE_COMMAND_UI(ID_VIEW_STATUS_BAR, OnUpdateViewStatusBar)
+	ON_WM_CLOSE()
+    ON_MESSAGE(WSA_READ,OnRead)
+    ON_MESSAGE(WSA_ACCEPT,OnAccept)
+    ON_MESSAGE(WM_OUTBAR_NOTIFY, OnOutbarNotify)
+END_MESSAGE_MAP()
+static UINT indicators[] =
+{
+	ID_SEPARATOR,          
+	ID_SEPARATOR,
+	ID_SEPARATOR,
+	ID_SEPARATOR,
+};
+IMPLEMENT_DYNAMIC(COutlookBar,CGfxOutBarCtrl)
+BEGIN_MESSAGE_MAP(COutlookBar,CGfxOutBarCtrl)
+	ON_WM_ERASEBKGND()	
+END_MESSAGE_MAP()
+BOOL COutlookBar::OnEraseBkgnd(CDCpDC) 
+{
+	crBackGroundColor = RGB(0,168,150);
+	return true;
+}
+LRESULT CMainFrame::OnOutbarNotify(WPARAM wParam, LPARAM lParam)
+{
+	if((wParam)==NM_OB_ITEMCLICK)
+	{
+     CPlayView* pView=(CPlayView)m_wndSplitter.GetPane(0,1);
+	 :SendMessage(pView->m_hWnd,WM_VIEW_OUTBAR_NOTIFY,wParam,lParam);
+	}
+    return 0;
+}
+LRESULT CMainFrame::OnAccept(WPARAM wParam,LPARAM lParam)
+{
+	int acsock;
+	int status;
+	if (WSAGETSELECTERROR( lParam ))
+		return -1;
+	if (WSAGETSELECTERROR( lParam ) == 0) 
+	{   
+		int req_sin_len = sizeof(req_sin );
+		acsock = accept(Lsock,(struct sockaddr FAR )req_sin,(int FAR)req_sin_len);
+		if (acsock < 0) 
+		{
+			MessageBox("Cant Accepted a connection!");
+			return -1;
+		}
+//视觉检测数据信息
+		if ((status = WSAAsyncSelect(acsock, m_hWnd,WSA_READ,FD_READ|FD_CLOSE))<0) 
+		{
+            MessageBox("Error on WSAAsyncSelect()");
+           	closesocket(acsock );
+			return -1;
+		}
+	}
+	return 0;
+}
+LRESULT CMainFrame:OnRead(WPARAM wParam,LPARAM lParam) 
+{
+	int status;
+	char szRev[80];
+	char szBuff[80];
+	char szSend[80];
+	strcpy(szSend,MULTIDESTADDR);
+	strcat(szSend, strDESTPORT);
+	if (WSAGETSELECTERROR( lParam ))
+ 		return -1;
+	if (WSAGETSELECTEVENT(lParam) == FD_READ)
+	{
+	status =recv(wParam, szRev, 80,0);
+		if (status) 
+		{
+			if (strcmp==0)
+			{
+ 				sprintf;     
+ 				MessageBox(szBuff, "Client Request Data", MB_OK);	
+				send(wParam, szSend, sizeof(szSend),0);          
+			}
+		}
+		else 
+			if(status==0)
+				MessageBox("Connection was closed by client", "Server", MB_OK);
+	}
+	else 
+	{ 
+   		MessageBox; 
+		closesocket((SOCKET)wParam);            
+	} 
+	return 0;
+}
+CMainFrame::CMainFrame()
+{
+}
+CMainFrame::~CMainFrame()
+{
+}
+BOOL CMainFrame::OnCreateClient(LPCREATESTRUCT lpcs, CCreateContext* pContext) 
+{
+	if (!m_wndSplitter.CreateStatic(this, 1, 2))
+	{
+		TRACE0("Failed to create splitter window\n");
+		return FALSE;
+	}
+//视觉检测数据展示
+	if (!m_wndSplitter.CreateView(0, 1, RUNTIME_CLASS(CPlayView),
+		CSize(0, 0), pContext))
+	{
+		TRACE0("Failed to create CTestView\n"); 
+		return FALSE;
+	}
+	DWORD dwStyle = 
+		CGfxOutBarCtrl::fDragItems    |
+		CGfxOutBarCtrl::fEditGroups   |
+		CGfxOutBarCtrl::fEditItems    |
+		CGfxOutBarCtrl::fRemoveGroups |
+		CGfxOutBarCtrl::fRemoveItems  |
+		CGfxOutBarCtrl::fAddGroups    |
+		CGfxOutBarCtrl::fAnimation;
+		if (!m_wndOutlookBar.Create(WS_CHILD|WS_VISIBLE, CRect(0,0,0,0),
+		m_wndSplitter, m_wndSplitter.IdFromRowCol(0, 0), dwStyle))
+	{
+		TRACE0("Failed to create outlook bar.");
+		return FALSE;
+	}
+	m_wndOutlookBar.SetOwner(this);
+	m_ImageLarge.Create (32, 32, TRUE, 2, 1);
+	for( int nIcon = 0; nIcon <12; ++nIcon ) 
+	{
+		HICON hIcon = AfxGetApp()->LoadIcon(CPlayApp::m_nImages[nIcon]);
+		ASSERT(hIcon);
+		m_ImageLarge.Add(hIcon);
+	}
+	m_wndOutlookBar.SetImageList(m_ImageLarge, CGfxOutBarCtrl::fLargeIcon);
+	m_wndOutlookBar.SetAnimationTickCount(20);
+	m_wndOutlookBar.SetAnimSelHighlight(200);
+	m_wndOutlookBar.AddFolder(_TPLAY);
+	m_wndOutlookBar.AddFolder(_TCAPTURE);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Set, _T0, 0);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Open, _T1,0);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Begin, _T2,0);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Pause, _T3,0);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Resume, _T4, 0);
+	m_wndOutlookBar.InsertItem(PLAY, Play_Stop, _T5, 0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Preview, _T6,0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Set, _T7,0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Begin, _T8,0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Pause, _T9,0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Resume, _T10,0);
+	m_wndOutlookBar.InsertItem(CAPTURE, Cap_Stop, _T11,0);
+	m_wndOutlookBar.SetSelFolder(1);
+ 	CRect r;
+//内容管理
+	GetClientRect(r);
+	int w1 = r.Width()/7;
+	int w2 = r.Width()/5;
+	m_wndSplitter.SetColumnInfo( 0, w1, 0 );
+	m_wndSplitter.SetColumnInfo( 1, w2, 0 );
+	m_wndSplitter.RecalcLayout();
+   	return TRUE;
+}
+int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
+{
+	if (CFrameWnd::OnCreate(lpCreateStruct) == -1)
+		return -1;
+		if (!m_wndToolBar.CreateEx(this, TBSTYLE_FLAT, WS_CHILD | WS_VISIBLE | CBRS_TOP
+		| CBRS_GRIPPER | CBRS_TOOLTIPS | CBRS_FLYBY | CBRS_SIZE_DYNAMIC) 
+		!m_wndToolBar.LoadToolBar(IDR_MAINFRAME))
+	{
+		TRACE0("Failed to create toolbar\n");
+		return -1;   
+	}
+	if (!m_wndStatusBar.Create(this,WS_CHILD|WS_VISIBLE|CBRS_BOTTOM,ID_MY_STATUSBAR) 
+		!m_wndStatusBar.SetIndicators(indicators,
+		  sizeof(indicators)/sizeof(UINT)))
+	{
+		TRACE0("Failed to create status bar\n");
+		return -1;     
+	m_wndStatusBar.SetPaneInfo(0,0,0,270);
+	m_wndToolBar.EnableDocking(CBRS_ALIGN_ANY);
+	EnableDocking(CBRS_ALIGN_ANY);
+	DockControlBar(m_wndToolBar);
+    PopMenu.LoadMenu(IDR_POPUP);
+	return 0;
+}
+BOOL CMainFrame::PreCreateWindow(CREATESTRUCTcs)
+{
+	if( !CFrameWnd::PreCreateWindow(cs) )
+		return FALSE;
+	return TRUE;
+}
+#ifdef _DEBUG
+void CMainFrame::AssertValid() const
+{
+	CFrameWnd::AssertValid();
+}
+void CMainFrame::Dump(CDumpContextdc) const
+{
+	CFrameWnd::Dump(dc);
+}
+#endif //_DEBUG
+void CMainFrame::OnViewStatusBar() 
+{
+	m_wndStatusBar.ShowWindow((m_wndStatusBar.GetStyle()WS_VISIBLE)==0);
+    RecalcLayout();
+}
+//权限管理
+void CMainFrame::OnUpdateViewStatusBar(CCmdUIpCmdUI) 
+{
+	pCmdUI->SetCheck((m_wndStatusBar.GetStyle()WS_VISIBLE)!=0);
+    pCmdUI->SetCheck(m_wndStatusBar.ShowWindow(m_wndStatusBar.GetStyle()));
+}
+void CMainFrame::ActivateFrame(int nCmdShow) 
+{
+	m_wndSplitter.SetActivePane(0,1,NULL);
+	nCmdShow=SW_MAXIMIZE;
+	CFrameWnd::ActivateFrame(nCmdShow);
+}
+void CMainFrame::OnClose() 
+{
+	CPlayView* pView=(CPlayView)GetActiveView();
+	pView->SendMessage(WM_PREPARE_CLOSE);
+    ::WaitForSingleObject(g_eventClearup,0);
+	CFrameWnd::OnClose();
+}
+CModifyPwd::CModifyPwd(CWndpParent /=NULL/)
+	: CDialog(CModifyPwd::IDD, pParent)
+{
+	m_NewPwd = _T("");
+	m_OldPwd = _T("");
+	m_ReNewPwd = _T("");
+	m_count=0;
+}
+void CModifyPwd::DoDataExchange(CDataExchangepDX)
+{
+	CDialog::DoDataExchange(pDX);
+	DDX_Text(pDX, IDC_NEWPWD, m_NewPwd);
+	DDX_Text(pDX, IDC_OlDPWD, m_OldPwd);
+	DDX_Text(pDX, IDC_RENEWPWD, m_ReNewPwd);
+}
+BEGIN_MESSAGE_MAP(CModifyPwd, CDialog)
+	ON_BN_CLICKED(IDC_OK, OnOk)
+END_MESSAGE_MAP()
+void CModifyPwd::OnOk() 
+{
+   	m_count++;
+	UpdateData(TRUE);
+    m_NewPasswd=m_NewPwd.GetBuffer(50);
+	m_NewPwd.ReleaseBuffer();
+	if((strcmp(m_OldPwd,dw_Passwd))!=0m_count<2)
+	{
+	  MessageBox;
+	  CWndpWnd=GetDlgItem(IDC_OlDPWD);
+	  pWnd->SetWindowText("");
+	  pWnd->SetFocus();
+	}
+	if((strcmp(m_OldPwd,dw_Passwd))!=0m_count==2)
+	{
+	    fail=TRUE;
+		CDialog::OnOK();
+	}
+	if((strcmp(m_OldPwd,dw_Passwd))==0)
+	{
+	  if((strcmp(m_ReNewPwd,m_NewPwd))!=0)
+	  {
+	    MessageBox;
+        CWndpWnd1=GetDlgItem(IDC_NEWPWD);
+	    pWnd1->SetWindowText("");
+		pWnd1->SetFocus();
+		CWndpWnd2=GetDlgItem(IDC_RENEWPWD);
+	    pWnd2->SetWindowText("");
+	  }
+	  if((strcmp(m_ReNewPwd,m_NewPwd))==0)
+	  {
+		   if((RegSetValueEx(PasswdKey,"Passwd",
+			0,REG_SZ,(CONST BYTE)m_NewPasswd,strlen(m_NewPasswd)+1))==ERROR_SUCCESS)
+		  {
+			  RegFlushKey(PasswdKey);
+			  RegCloseKey(PasswdKey);
+		  }
+		   else
+			   fail=TRUE;
+		  CDialog::OnOK();
+	  }
+	}
+}
+LPCTSTR PictureTypes[8]   = { TEXT("forbidden frame type"),
+                              TEXT("I-Frame"),
+                              TEXT("P-Frame"),
+                              TEXT("B-Frame"),
+                              TEXT("D-Frame"),
+                              TEXT("Reserved frame type"),
+                              TEXT("Reserved frame type"),
+                              TEXT("Reserved frame type")
+                            };
+LPCTSTR PelAspectRatios[16] = { TEXT("Forbidden"),
+                                TEXT("1.0000 - VGA etc"),
+                                TEXT("0.6735"),
+                                TEXT("0.7031 - 16:9, 625 line"),
+                                TEXT("0.7615"),
+                                TEXT("0.8055"),
+                                TEXT("0.8437 - 16:9, 525 line"),
+                                TEXT("0.8935"),
+                                TEXT("0.9375 - CCIR601, 625 line"),
+                                TEXT("0.9815"),
+                                TEXT("1.0255"),
+                                TEXT("1.0695"),
+                                TEXT("1.1250 - CCIR601, 525 line"),
+                                TEXT("1.1575"),
+                                TEXT("1.2015"),
+                                TEXT("Reserved") };
+LPCTSTR PictureRates[16] = { TEXT("Forbidden"),
+                             TEXT("23.976"),
+                             TEXT("24"),
+                             TEXT("25"),
+                             TEXT("29.97"),
+                             TEXT("30"),
+                             TEXT("50"),
+                             TEXT("59.94"),
+                             TEXT("60"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved"),
+                             TEXT("Reserved") };
+const LONG PictureTimes[16] = { 0,
+                                (LONG)((double)10000000 / 23.976),
+                                (LONG)((double)10000000 / 24),
+                                (LONG)((double)10000000 / 25),
+                                (LONG)((double)10000000 / 29.97),
+                                (LONG)((double)10000000 / 30),
+                                (LONG)((double)10000000 / 50),
+                                (LONG)((double)10000000 / 59.94),
+                                (LONG)((double)10000000 / 60)
+                              };
+const float fPictureRates[] =
+   {
+     (float)0,
+     (float)23.976,
+     (float)24,
+     (float)25,
+     (float)29.97,
+     (float)30,
+     (float)50,
+     (float)59.94,
+     (float)60.0
+   };
+const LONG AspectRatios[16] = { 0,
+                                393700,
+                                (LONG)(393700.0 * 0.6735),
+                                (LONG)(393700.0 * 0.7031),
+                                (LONG)(393700.0 * 0.7615),
+                                (LONG)(393700.0 * 0.8055),
+                                (LONG)(393700.0 * 0.8437),
+                                (LONG)(393700.0 * 0.8935),
+                                (LONG)(393700.0 * 0.9375),
+                                (LONG)(393700.0 * 0.9815),
+                                (LONG)(393700.0 * 1.0255),
+                                (LONG)(393700.0 * 1.0695),
+                                (LONG)(393700.0 * 1.1250),
+                                (LONG)(393700.0 * 1.1575),
+                                (LONG)(393700.0 * 1.2015),
+                                0
+                              };
+const WORD BitRates[3][16] =
+{{  0, 32,  64,  96,  128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 0 }
+ {  0, 32,  48,  56,   64,  80,  96, 112, 128, 160, 192, 224, 256, 320, 384, 0 },
+ {  0, 32,  40,  48,   56,  64,  80,  96, 112, 128, 160, 192, 224, 256, 320, 0 }
+};
+BOOL inline TESTBIT(const BYTEpbData, int n)
+{
+    return 0 != (pbData[n >> 3] (0x80 >> (n7)));
+}
+LONG ParseSystemHeader(const BYTEpbData, DWORD cbData)
+{
+    BOOL bHasAudio = FALSE;
+    BOOL bHasVideo = FALSE;
+    ASSERT(cbData >= 4);
+    ASSERT(*(UNALIGNED DWORD)pbData == DWORD_SWAP(SYSTEM_HEADER_START_CODE));
+    if (cbData < 6) {
+        return 0;
+    }
+    DWORD dwLen = 6 + pbData[5] + (pbData[4] << 8);
+    if (dwLen < SYSTEM_HEADER_BASIC_LENGTH) {
+        DbgLog((LOG_ERROR, 1, TEXT("Invalid System Header length")));
+        return 4;
+    }
+    if (cbData < dwLen) {
+        return 0;
+    }
+    if (0 == (pbData[6] & 0x80) ||
+        0 == (pbData[8] & 0x01) ||
+        0 == (pbData[10] & 0x20)) {
+        DbgLog((LOG_ERROR, 1, TEXT("Invalid System Header Marker bits")));
+        return 4;
+    }
+    const BYTE * pbNext = pbData + SYSTEM_HEADER_BASIC_LENGTH;        pivw->put_Owner(NULL);
+        HELPER_RELEASE(pivw);
+	}
+	HELPER_RELEASE(CapPigb);
+    HELPER_RELEASE(CappFg);
+    HELPER_RELEASE(pVCap);	
+}
+void CVideoPlay::PlayFromFile(CString szFile)
+{
+      WCHAR wFile[MAX_PATH];
+	  HRESULT   hr;
+	  MultiByteToWideChar( CP_ACP, 0, szFile.GetBuffer(_MAX_PATH), -1, wFile, MAX_PATH );
+      szFile.ReleaseBuffer();
+      CHECK_ERROR(::CoCreateInstance(CLSID_FilterGraph, NULL, CLSCTX_INPROC_SERVER, 
+		           IID_IGraphBuilder, (void)&pigb),"CoCreateInstance Error") ;
+      pigb->QueryInterface(IID_IMediaControl, (void )&pimc); 
+      hr=pigb->QueryInterface(IID_IMediaEventEx, (void)&pimex);
+      pigb->QueryInterface(IID_IVideoWindow, (void )pivw);
+      hr=pigb->QueryInterface(IID_IMediaPosition, (void) pmp);
+      hr = pigb->RenderFile(wFile, NULL);
+	  if (SUCCEEDED(hr)) 	           
+         hr=pmp->get_Duration(tLength);  
+	  DisplayVideoWin();    
+	  if (SUCCEEDED(hr))
+         pimc->Run();     
+	  pimex->SetNotifyWindow((OAHWND)m_hwnd, WM_PLAYOVER, 0);
+}
+int CVideoPlay::PlayOver()
+{
+  long evCode,evParam1,evParam2;
+  HRESULT   hr;
+  if(pimex)
+  {
+  while (SUCCEEDED(pimex->GetEvent(evCode, evParam1, evParam2, 0)))
+      { 
+               hr = pimex->FreeEventParams(evCode, evParam1, evParam2);
+                if (EC_COMPLETE == evCode)
+                  { 
+                    if (pivw)
+                      { 
+                        pivw->put_Visible(OAFALSE);
+                        pivw->put_Owner(NULL);
+                        HELPER_RELEASE(pivw);
+                      } 
+                    HELPER_RELEASE(pigb);
+                    HELPER_RELEASE(pimc);
+                 	HELPER_RELEASE(pmp);
+				    HELPER_RELEASE(pimex);
+					return 0;
+				  break;
+				}
+
+    DWORD cbLeft = dwLen - SYSTEM_HEADER_BASIC_LENGTH;
+    for ( ; cbLeft >= 3; cbLeft -= 3, pbNext += 3) {
+        if (pbNext[0] == AUDIO_GLOBAL) {
+            bHasAudio = TRUE;
+        } else
+        if (pbNext[0] == VIDEO_GLOBAL) {
+            bHasVideo = TRUE;
+        } else {
+            if (pbNext[0] < PROGRAM_STREAM_MAP) {
+                DbgLog((LOG_ERROR, 1, TEXT("Invalid stream id in system header")));
+                return 4;
+            }
+            if (IsVideoStreamId(pbNext[0])) {
+                bHasVideo = TRUE;
+            } else
+            if (IsAudioStreamId(pbNext[0])) {
+                bHasAudio = TRUE;
+            }
+        }
+    }
+    if (cbLeft != 0) {
+        DbgLog((LOG_ERROR, 1, TEXT("Invalid system header length")));
+        return 4;
+    }
+    DbgLog((LOG_TRACE, 4, TEXT("System Header %s, %s"),
+            bHasAudio ? TEXT("audio") : TEXT("No audio"),
+            bHasVideo ? TEXT("video") : TEXT("No video")));
+    return dwLen;
+}
+DWORD ParseMPEG1Packet(
+    const BYTEpbData,
+    DWORD cbData,
+    MPEG_PACKET_DATApPacketData,
+	DWORDPts
+)
+{
+    ZeroMemory((PVOID)pPacketData, sizeof(pPacketData));
+    DWORD dwStartCode = DWORD_SWAP((UNALIGNED DWORD )pbData);
+    DbgLog((LOG_TRACE, 4, TEXT("Parse packet %d bytes"), cbData));
+    if (cbData < 6) {
+        return 0;
+    }
+    DWORD dwLen = ((LONG)pbData[4] << 8) + (LONG)pbData[5] + 6;
+    DbgLog((LOG_TRACE, 4, TEXT("Packet length %d bytes"), dwLen));
+    if (dwLen > cbData) {
+        return 0;
+    }
+    pPacketData->dwPacketLen = dwLen;
+    DWORD dwHeaderSize = 6;
+    if (dwStartCode != PRIVATE_STREAM_2) {
+        DWORD dwPts = 6;
+        for (;;) {
+            if (dwPts >= dwLen) {
+                return 4;
+            }
+            if (pbData[dwPts]0x80) {
+                if (pbData[dwPts] != 0xFF) {
+                    return 4;
+                }
+                dwPts++;
+                continue;
+            }
+            if (pbData[dwPts]0x40) { 
+                dwPts += 2;
+                continue;
+            }
+            if (pbData[dwPts] == 0x0F) {
+                dwHeaderSize = dwPts + 1;
+                break;
+            }
+            if ((pbData[dwPts] 0xF0) == 0x20 ||
+                (pbData[dwPts]0xF0) == 0x30) {
+                dwHeaderSize = (pbData[dwPts] & 0xF0) == 0x20 ? dwPts + 5 :
+                                                             dwPts + 10;
+                if (dwHeaderSize > dwLen) {
+                    return 4;
+                }
+                if (!GetClock(pbData + dwPts, &pPacketData->llPts)) {
+					Pts = dwPts;
+                    return 4;
+                }
+                pPacketData->bHasPts = TRUE;
+                break;
+            } else {
+                return 4;
+                break;
+            }
+        }
+    }
+    pPacketData->dwHeaderLen = dwHeaderSize;
+    return dwLen;
+}
+BOOL ParseSequenceHeader(const BYTEpbData, LONG lData, SEQHDR_INFO *pInfo)
+{
+    ASSERT(*(UNALIGNED DWORD)pbData == DWORD_SWAP(SEQUENCE_HEADER_CODE));
+    if (!(pbData[10]0x20)) {
+        DbgLog((LOG_ERROR, 2, TEXT("Sequence header invalid marker bit")));
+        return FALSE;
+    }
+    DWORD dwWidthAndHeight = ((DWORD)pbData[4] << 16) +
+                             ((DWORD)pbData[5] << 8) +
+                             ((DWORD)pbData[6]);
+    pInfo->lWidth = dwWidthAndHeight >> 12;
+    pInfo->lHeight = dwWidthAndHeight0xFFF;
+    DbgLog((LOG_TRACE, 2, TEXT("Width = %d, Height = %d"),
+        pInfo->lWidth,
+        pInfo->lHeight));
+    BYTE PelAspectRatioAndPictureRate=pbData[7];
+    if ((PelAspectRatioAndPictureRate0x0F) > 8) {
+        PelAspectRatioAndPictureRate= 0xF7;
+    }
+    DbgLog((LOG_TRACE, 2, TEXT("Pel Aspect Ratio = %s"),
+        PelAspectRatios[PelAspectRatioAndPictureRate >> 4]));
+    DbgLog((LOG_TRACE, 2, TEXT("Picture Rate = %s"),
+        PictureRates[PelAspectRatioAndPictureRate0x0F]));
+    if ((PelAspectRatioAndPictureRate0xF0) == 0 ||
+        (PelAspectRatioAndPictureRate0x0F) == 0) {
+        DbgLog((LOG_ERROR, 2, TEXT("Sequence header invalid ratio/rate")));
+        return FALSE;
+    }
+    pInfo->tPictureTime = (LONGLONG)PictureTimes[PelAspectRatioAndPictureRate 0x0F];
+    pInfo->fPictureRate = fPictureRates[PelAspectRatioAndPictureRate0x0F];
+    pInfo->lTimePerFrame = MulDiv((LONG)pInfo->tPictureTime, 9, 1000);
+    pInfo->dwBitRate = ((((DWORD)pbData[8] << 16) +
+                   ((DWORD)pbData[9] << 8) +
+                   (DWORD)pbData[10]) >> 6);
+    if (pInfo->dwBitRate == 0x3FFFF) {
+        DbgLog((LOG_TRACE, 2, TEXT("Variable video bit rate")));
+        pInfo->dwBitRate = 0;
+    } else {
+        pInfo->dwBitRate= 400;
+        DbgLog((LOG_TRACE, 2, TEXT("Video bit rate is %d bits per second"),
+               pInfo->dwBitRate));
+    }
+#if 0
+#else
+    LONG lNotionalPelsPerMeter = 2000;
+#endif
+   pInfo->lXPelsPerMeter = lNotionalPelsPerMeter;
+    pInfo->lYPelsPerMeter = MulDiv(
+                              lNotionalPelsPerMeter,
+                              AspectRatios[PelAspectRatioAndPictureRate >> 4],
+                              10000);
+    pInfo->lvbv = ((((LONG)pbData[10] & 0x1F) << 5) |
+            ((LONG)pbData[11] >> 3))2048;
+    DbgLog((LOG_TRACE, 2, TEXT("vbv size is %d bytes"), pInfo->lvbv));
+    if (pbData[11]0x04) {
+        DbgLog((LOG_TRACE, 2, TEXT("Constrained parameter video stream")));
+        if (pInfo->lvbv > 40960) {
+            DbgLog((LOG_ERROR, 1, TEXT("Invalid vbv (%d) for Constrained stream"),
+                    pInfo->lvbv));
+            pInfo->lvbv = 40960;
+        }
+    } else {
+        DbgLog((LOG_TRACE, 2, TEXT("Non-Constrained parameter video stream")));
+    }
+    if (pInfo->lvbv < 20000) {
+        DbgLog((LOG_TRACE, 2, TEXT("Small vbv (%d) - setting to 40960"),
+               pInfo->lvbv));
+        pInfo->lvbv = 40960;
+    }
+    pInfo->lActualHeaderLen = SequenceHeaderSize(pbData);
+    CopyMemory((PVOID)pInfo->RawHeader, (PVOID)pbData, pInfo->lActualHeaderLen);
+    return TRUE;
+}
+HRESULT GetVideoMediaType(CMediaType cmt, BOOL bPayload, const SEQHDR_INFOpInfo)
+{
+    cmt->majortype = MEDIATYPE_Video;
+cmt->subtype = bPayload ? MEDIASUBTYPE_MPEG1Payload :   
+                          MEDIASUBTYPE_MPEG1Packet;
+    VIDEOINFO *videoInfo =
+        (VIDEOINFO)cmt->AllocFormatBuffer(FIELD_OFFSET(MPEG1VIDEOINFO, bSequenceHeader[pInfo->lActualHeaderLen]));
+    if (videoInfo == NULL) {
+        return E_OUTOFMEMORY;
+    }
+    RESET_HEADER(videoInfo);
+    videoInfo->dwBitRate          = pInfo->dwBitRate;
+    videoInfo->rcSource.right     = pInfo->lWidth;
+    videoInfo->bmiHeader.biWidth  = pInfo->lWidth;
+    videoInfo->rcSource.bottom    = pInfo->lHeight;
+    videoInfo->bmiHeader.biHeight = pInfo->lHeight;
+    videoInfo->bmiHeader.biXPelsPerMeter = pInfo->lXPelsPerMeter;
+    videoInfo->bmiHeader.biYPelsPerMeter = pInfo->lYPelsPerMeter;
+    videoInfo->bmiHeader.biSize   = sizeof(BITMAPINFOHEADER);
+    videoInfo->AvgTimePerFrame = pInfo->tPictureTime;
+    MPEG1VIDEOINFO *mpgvideoInfo = (MPEG1VIDEOINFO )videoInfo;
+    mpgvideoInfo->cbSequenceHeader = pInfo->lActualHeaderLen;
+    CopyMemory((PVOID)mpgvideoInfo->bSequenceHeader,
+               (PVOID)pInfo->RawHeader,
+               pInfo->lActualHeaderLen);
+    mpgvideoInfo->dwStartTimeCode = pInfo->dwStartTimeCode;
+    cmt->SetFormatType(&FORMAT_MPEGVideo);
+    return S_OK;
+}
+BOOL CheckAudioHeader(const BYTE * pbData)
+{
+#pragma message (REMIND("Check audio header"))
+    if ((pbData[2]0x0C) == 0x0C) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio sampling frequency")));
+        return FALSE;
+    }
+    if ((pbData[1]0x08) != 0x08) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio ID bit = 0")));
+        return FALSE;
+    }
+    if (((pbData[1] >> 1)3) == 0x00) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio Layer")));
+        return FALSE;
+    }
+    if (((pbData[2] >> 2)3) == 3) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid sample rate")));
+        return FALSE;
+    }
+    if ((pbData[2] >> 4) == 0x0F) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid bit rate")));
+        return FALSE;
+    }
+    return TRUE;
+}
+LONG SampleRate(const BYTE * pbData)
+{
+    switch ((pbData[2] >> 2)3) {
+        case 0:
+            return 44100;
+        case 1:
+            return 48000;
+        case 2:
+            return 32000;
+        default:
+            DbgBreak("Unexpected Sample Rate");
+            return 44100;
+    }
+}
+BOOL ParseAudioHeader(const BYTEpbData, MPEG1WAVEFORMATpFormat)
+{
+    if (!CheckAudioHeader(pbData)) {
+        return FALSE;
+    }
+    pFormat->wfx.wFormatTag = WAVE_FORMAT_MPEG;
+    switch (pbData[3] >> 6) {
+    case 0x00:
+        pFormat->fwHeadMode = ACM_MPEG_STEREO;
+        break;
+    case 0x01:
+        pFormat->fwHeadMode = ACM_MPEG_JOINTSTEREO;
+        break;
+    case 0x02:
+        pFormat->fwHeadMode = ACM_MPEG_DUALCHANNEL;
+        break;
+    case 0x03:
+        pFormat->fwHeadMode = ACM_MPEG_SINGLECHANNEL;
+        break;
+    }
+    pFormat->wfx.nChannels =
+        (WORD)(pFormat->fwHeadMode == ACM_MPEG_SINGLECHANNEL ? 1 : 2);
+    pFormat->fwHeadModeExt = (WORD)(1 << (pbData[3] >> 4));
+    pFormat->wHeadEmphasis = (WORD)((pbData[3]0x03) + 1);
+pFormat->fwHeadFlags   = (WORD)(((pbData[2]1) ? ACM_MPEG_PRIVATEBIT : 0) +
+                           ((pbData[3]8) ? ACM_MPEG_COPYRIGHT : 0) +
+                           ((pbData[3]4) ? ACM_MPEG_ORIGINALHOME : 0) +
+                           ((pbData[1]1) ? ACM_MPEG_PROTECTIONBIT : 0) +
+                           ((pbData[1]0x08) ? ACM_MPEG_ID_MPEG1 : 0));
+    int Layer;
+    switch ((pbData[1] >> 1)3) {
+        case 3:
+            pFormat->fwHeadLayer = ACM_MPEG_LAYER1;
+            Layer = 1;
+            break;
+        case 2:
+            pFormat->fwHeadLayer = ACM_MPEG_LAYER2;
+            Layer = 2;
+            break;
+        case 1:
+            pFormat->fwHeadLayer = ACM_MPEG_LAYER3;
+            Layer = 3;
+            break;
+        case 0:
+            return (FALSE);
+    }
+    pFormat->wfx.nSamplesPerSec = SampleRate(pbData);
+    pFormat->dwHeadBitrate =
+        (DWORD)BitRates[Layer - 1][pbData[2] >> 4]1000;
+    pFormat->wfx.nAvgBytesPerSec = pFormat->dwHeadBitrate / 8;
+#pragma message (REMIND("Handle variable bit rate (index 0)"))
+            (pbData[2] >> 4) == 0)) {
+        if (Layer == 1) {
+            pFormat->wfx.nBlockAlign = (WORD)
+                (4((pFormat->dwHeadBitrate12) / 
+pFormat->wfx.nSamplesPerSec));
+        } else {
+            pFormat->wfx.nBlockAlign = (WORD)
+                ((144 * pFormat->dwHeadBitrate) / pFormat->wfx.nSamplesPerSec);
+        }
+    } else {
+        pFormat->wfx.nBlockAlign = 1;
+    }
+    pFormat->wfx.wBitsPerSample = 0;
+    pFormat->wfx.cbSize = sizeof(MPEG1WAVEFORMAT) - sizeof(WAVEFORMATEX);
+    pFormat->dwPTSLow  = 0;
+    pFormat->dwPTSHigh = 0;
+    return TRUE;
+}
+BOOL GetClock(const BYTEpData, LONGLONGClock)
+{
+    BYTE  Byte1 = pData[0];
+    DWORD Word2 = ((DWORD)pData[1] << 8) + (DWORD)pData[2];
+    DWORD Word3 = ((DWORD)pData[3] << 8) + (DWORD)pData[4]; 
+        (Word31) != 1) {
+        DbgLog((LOG_TRACE, 2, TEXT("Invalid clock field - 0x%2.2X 0x%4.4X 
+0x%4.4X"),
+            Byte1, Word2, Word3));
+        return FALSE;
+    }
+    LARGE_INTEGER liClock;
+    liClock.HighPart = (Byte18) != 0;
+    liClock.LowPart  = (DWORD)((((DWORD)Byte10x6) << 29) +
+                       (((DWORD)Word20xFFFE) << 14) +
+                       ((DWORD)Word3 >> 1));
+      return TRUE;
+}
+BOOL SetClock(BYTEpData, LONGLONGClock)
+{
+    LARGE_INTEGER liClock;
+    liClock.QuadPart = Clock;
+	BYTE Byte = ((BYTE)(liClock.HighPart1) << 3) + 
+				 ((BYTE)(liClock.LowPart >> 29)0x06);
+	pData[0] = (pData[0]0xf1 ) | Byte;
+	Byte = (BYTE)(liClock.LowPart >> 22);
+	pData[1] = Byte;
+	Byte = (BYTE)(liClock.LowPart >> 14)0xfe;
+	pData[2] = (pData[2]0x01) | Byte;
+	Byte = (BYTE)(liClock.LowPart >> 7);
+	pData[3] = Byte;
+	Byte = (BYTE)(liClock.LowPart << 1)0xfe;
+	pData[4] = (pData[4] &0x01) | Byte;
+    return TRUE;
+}
+BOOL NextStartCode(const BYTEppbData, DWORDpdwLeft)
+{
+    const BYTEpbData = ppbData;
+    DWORD dwLeft = pdwLeft;
+    while (dwLeft > 4 
+           ((UNALIGNED DWORD )pbData0x00FFFFFF) != 0x00010000) {
+        dwLeft--;
+        pbData++;
+    }    
+    return dwLeft >= 4;
+}
+void CModifyPwd::OnCancel() 
+{
+	fail=TRUE;
+	CDialog::OnCancel();
+}
+BOOL CModifyPwd::OnInitDialog() 
+{
+	CDialog::OnInitDialog();
+	CWnd* pWnd=GetDlgItem(IDC_OlDPWD);
+    pWnd->SetFocus();
+	return FALSE; 
+}
+BOOL fail;
+HKEY PasswdKey;
+char dw_Passwd[100];
+BOOL	m_Modify;
+SOCKET Lsock;          
+SOCKADDR_IN  DestAddr; 
+SOCKET MultiSock ; 
+BEGIN_MESSAGE_MAP(CPlayApp, CWinApp)
+	ON_COMMAND(ID_APP_ABOUT, OnAppAbout)
+	ON_COMMAND(ID_FILE_NEW, CWinApp::OnFileNew)
+	ON_COMMAND(ID_FILE_OPEN, CWinApp::OnFileOpen)
+END_MESSAGE_MAP()
+UINT CPlayApp::m_nImages[12] =
+{
+	IDI_ICON1,
+	IDI_ICON2,
+	IDI_ICON3,
+	IDI_ICON4,
+	IDI_ICON5,
+	IDI_ICON6,
+	IDI_ICON7,
+	IDI_ICON8,
+	IDI_ICON9,
+	IDI_ICON10,
+	IDI_ICON11,
+	IDI_ICON12,
+};
+CPlayApp::CPlayApp()
+{
+}
+CPlayApp theApp;
+BOOL CPlayApp::InitInstance()
+{
+	AfxEnableControlContainer();
+#ifdef _AFXDLL
+	Enable3dControls();			
+	Enable3dControlsStatic();	
+#endif
+	CSingleDocTemplate* pDocTemplate;
+	pDocTemplate = new CSingleDocTemplate(
+		IDR_MAINFRAME,
+		RUNTIME_CLASS(CPlayDoc),
+		RUNTIME_CLASS(CMainFrame),       
+		RUNTIME_CLASS(CPlayView));
+	AddDocTemplate(pDocTemplate);
+    CoInitialize(NULL); 
+	CCommandLineInfo cmdInfo;
+	ParseCommandLine(cmdInfo);
+	if (!ProcessShellCommand(cmdInfo))
+		return FALSE;
+	    int status;
+	WSADATA WSAData;
+	if (!(status = WSAStartup(MAKEWORD(2,2), &WSAData)) == 0) 
+	{
+		AfxMessageBox("error StartUp");
+		return FALSE;
+	}
+		InitSocket();
+	InitMultiSocket();      
+	AddDevToMenu();
+	::SetWindowText(m_pMainWnd->m_hWnd,"远程监控系统");
+	return TRUE;
+}
+class CAboutDlg : public CDialog
+{
+public:
+	CAboutDlg();
+	enum { IDD = IDD_ABOUTBOX };
+	protected:
+	virtual void DoDataExchange(CDataExchange* pDX);   
+protected:
+	DECLARE_MESSAGE_MAP()
+};
+CAboutDlg::CAboutDlg() : CDialog(CAboutDlg::IDD)
+{
+}
+void CAboutDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialog::DoDataExchange(pDX);
+}
+BEGIN_MESSAGE_MAP(CAboutDlg, CDialog)
+END_MESSAGE_MAP()
+void CPlayApp::OnAppAbout()
+{
+	CAboutDlg aboutDlg;
+	aboutDlg.DoModal();
+}
+int CPlayApp::ExitInstance() 
+{
+    WSACleanup();
+	CoUninitialize();
+	return CWinApp::ExitInstance();
+}
+void CPlayApp::AddDevToMenu()
+{
+    CVideoPlay vPlay;
+	CStringList DevList;
+	int i;
+	CString DevName;
+	vPlay.FindDevice(DevList);
+	for(i=0;i<DevList.GetCount();i++)
+	{
+		DevName=DevList.GetHead();
+		CMenu* Pmenu=m_pMainWnd->GetMenu();
+		CMenu* Smenu=Pmenu->GetSubMenu(0);		
+		Smenu->AppendMenu(MF_STRING,MENU_VDEVICE0 + i,DevName);
+		Smenu->DeleteMenu(0,MF_BYPOSITION);
+		Smenu->EnableMenuItem(MENU_VDEVICE0 + i,MF_ENABLED||MF_BYCOMMAND);   
+    }
+DWORD CPlayApp::InitSocket()
+{
+  	SOCKADDR_IN send_sin;
+	int status;
+	CMainFrame* pFrame;
+	pFrame=(CMainFrame*)m_pMainWnd;
+	HWND m_hwndRec=pFrame->m_hWnd;
+	pFrame->m_bAutoMenuEnable=FALSE;
+	Lsock = socket(AF_INET,SOCK_STREAM,0);
+	if (Lsock == INVALID_SOCKET)
+	{
+		ErrMsg(m_hwndRec,"Socket failed");
+		return -1;
+	}
+	send_sin.sin_port=htons(1500); 
+	send_sin.sin_family=AF_INET;
+	send_sin.sin_addr.s_addr=INADDR_ANY;
+	if (bind(Lsock, (struct sockaddr FAR *) &send_sin, sizeof(send_sin))==SOCKET_ERROR) 
+	{
+		ErrMsg(m_hwndRec,"bind failed");
+	    closesocket(Lsock );
+		return -1;
+	}
+	if (listen(Lsock, 10) < 0) 
+	{
+		ErrMsg(m_hwndRec,"Listen failed");
+		closesocket(Lsock );
+		return -1;
+	}
+	if ((status = WSAAsyncSelect(Lsock,m_hwndRec,WSA_ACCEPT,FD_ACCEPT))>0) 
+	{
+ 		ErrMsg(m_hwndRec,"Error on WSAAsyncSelect()");
+        closesocket(Lsock );
+		return -1;
+	}
+	return 0;
+}
+void CPlayApp::ErrMsg(HWND hwnd, const char *ErrMsg)
+{
+  char szBuff[80];
+  sprintf(szBuff, "%d is the error", WSAGetLastError());
+  MessageBox(hwnd,szBuff,ErrMsg,MB_OK);
+}
+int CPlayApp::InitMultiSocket()
+{
+    int SendBuf;
+	DWORD cbRet;
+    int status;
+	BOOL bFlag;
+    SOCKADDR_IN  SrcAddr;
+    CMainFrame* pFrame=(CMainFrame*)m_pMainWnd;
+    HWND m_hwnd=pFrame->m_hWnd;
+	MultiSock = WSASocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP,
+		  (LPWSAPROTOCOL_INFO)NULL, 0, 
+    	  WSA_FLAG_MULTIPOINT_C_LEAF | WSA_FLAG_MULTIPOINT_D_LEAF);
+	if (MultiSock == INVALID_SOCKET) 
+	{
+	    ErrMsg(m_hwnd,"WSASocket Error");
+		return -1;
+    } 
+	bFlag = TRUE;
+	status = setsockopt(
+		MultiSock,				
+		SOL_SOCKET,				
+		SO_REUSEADDR,			
+		(char *)&bFlag,			
+		sizeof (bFlag));
+	if (status == SOCKET_ERROR) 
+	{
+	    ErrMsg(m_hwnd,"setsockopt Error");
+		return -1;
+	}
+	SrcAddr.sin_family = AF_INET;
+    SrcAddr.sin_port = htons (DESTPORT);
+    SrcAddr.sin_addr.s_addr = INADDR_ANY;
+    status = bind (
+        MultiSock, 
+        (struct sockaddr FAR *)&SrcAddr, 
+        sizeof(struct sockaddr));
+    if (status == SOCKET_ERROR) 
+	{
+		ErrMsg(m_hwnd,"bind Error");
+	    return -1;
+    }
+	nIP_TTL = 2;   
+	status = WSAIoctl (MultiSock,     
+		SIO_MULTICAST_SCOPE,   
+		&nIP_TTL,              
+		sizeof (nIP_TTL),      
+		NULL,             
+		0,         
+		&cbRet,                
+        NULL,                  
+        NULL);                 
+    if (status)
+	{
+     	ErrMsg(m_hwnd,"WSAIoctl Error");
+		return -1;
+    } 
+      bFlag = TRUE;
+      status = WSAIoctl (MultiSock,             
+          SIO_MULTIPOINT_LOOPBACK,              
+          bFlag,                               
+          sizeof (bFlag),                     
+          NULL,                                     
+          0,                                       
+          &cbRet,                                  
+          NULL,                           
+          NULL);                                   
+  	if (status)
+  	{
+       	ErrMsg(m_hwnd,"WSAIoctl Error");
+  		return -1;
+      } 
+	SendBuf=65536
+	status = setsockopt(
+		MultiSock,					
+    	SOL_SOCKET,				
+	    SO_SNDBUF,				
+	    sizeof(SendBuf));	
+	if (status == SOCKET_ERROR) 
+	{
+		ErrMsg(m_hwnd,"setsockopt Error");
+		return -1;
+	}
+	int ASendBuf;
+	int SLen=sizeof(ASendBuf);
+	status=getsockopt(MultiSock,SOL_SOCKET,SO_SNDBUF,      
+	if (status == SOCKET_ERROR) 
+	{
+	    ErrMsg(m_hwnd,"setsockopt Error");
+		return -1;
+	}
+    if(status==0)
+	{ 
+	 	if(ASendBuf!=65536)
+			return -1;
+	}
+    DestAddr.sin_family = AF_INET; 
+    DestAddr.sin_port = htons (DESTPORT);
+    DestAddr.sin_addr.s_addr =inet_addr(MULTIDESTADDR);
+	return 0;
+}
+typedef struct {
+    u_char*   operationid;
+} ngx_http_operationid_ctx_t;
+typedef struct {
+    ngx_flag_t  enable;
+    ngx_str_t   header_name;
+} ngx_http_operationid_loc_conf_t;
+static ngx_int_t ngx_http_operationid_add_variables(ngx_conf_t *cf);
+static void * ngx_http_operationid_create_loc_conf(ngx_conf_t *cf);
+static char * ngx_http_operationid_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+static ngx_int_t ngx_http_operationid_init_worker(ngx_cycle_t *cycle);
+static uint32_t  start_value;
+static uint32_t  sequencer_v2 = 0x03030302;
+static ngx_command_t  ngx_http_operationid_commands[] = {
+    { ngx_string( "operationid" ),
+      NGX_HTTP_NX programming development_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
+      ngx_conf_set_flag_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      0,
+      NULL },
+    { ngx_string("operationid_header"),
+      NGX_HTTP_NX programming development_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof( ngx_http_operationid_loc_conf_t, header_name),
+      NULL },
+      ngx_null_command
+};
+static ngx_http_module_t  ngx_http_operationid_module_ctx = {
+    ngx_http_operationid_add_variables,     
+    NULL,                                   
+    NULL,                                    
+    NULL,                                    
+    NULL,                                    
+    NULL,                                    
+    ngx_http_operationid_create_loc_conf,    
+    ngx_http_operationid_merge_loc_conf,     
+};
+ngx_module_t  ngx_http_operationid_module = {
+    NGX_MODULE_V1,
+    &ngx_http_operationid_module_ctx,    
+    ngx_http_operationid_commands,       
+    NGX_HTTP_MODULE,                     
+    NULL,                                
+    NULL,                                
+    ngx_http_operationid_init_worker,    
+    NULL,                                
+    NULL,                                
+    NULL,                                
+    NULL,                                
+    NGX_MODULE_V1_PADDING
+};
+    if ( found ) {
+       return ctx;
+    }
+    c = r->connection;
+    if (ngx_connection_local_sockaddr(c, NULL, 0) != NGX_OK) {
+        return NULL;
+    }
+    sin = (struct sockaddr_in *) c->local_sockaddr;
+    rid[0] = sin->sin_addr.s_addr;
+    rid[1] = htonl((uint32_t) ngx_time());
+    rid[2] = htonl(start_value);
+    rid[3] = htonl(sequencer_v2);
+    sequencer_v2 += 0x100;
+    if (sequencer_v2 < 0x03030302) {
+        sequencer_v2 = 0x03030302;
+    }
+    ctx->operationid = (u_char*) ngx_pcalloc(r->pool, 33);
+    ctx->operationid[32] = 0;
+    rid_as_pc = (u_char *) rid;
+    for(i=0; i<16; i++) {
+        ctx->operationid[2*i]   = hex[rid_as_pc[i] >> 4];
+        ctx->operationid[2*i+1] = hex[rid_as_pc[i] & 0xf];
+    }
+    return ctx;
+}
+static ngx_int_t
+ngx_http_operationid_get_variable(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ngx_http_operationid_ctx_t   *ctx;
+    ngx_http_operationid_loc_conf_t  *conf;
+    conf = ngx_http_get_module_loc_conf(r->NX programming development, ngx_http_operationid_module);
+    if (!conf->enable) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+    ctx = ngx_http_operationid_get_operationid(r, conf);
+    if (ctx == NULL) {
+        return NGX_OK;
+    }
+    v->valid = 1;
+    v->no_cacheable = 0;
+    v->not_found = 0;
+    v->len = ngx_strlen(ctx->operationid);
+    v->data = ctx->operationid;
+    return NGX_OK;
+}
+static ngx_int_t
+ngx_http_operationid_add_variables(ngx_conf_t *cf)
+{
+    ngx_http_variable_t  *var;
+    var = ngx_http_add_variable(cf, &ngx_http_operationid_variable_name, NGX_HTTP_VAR_NOHASH);
+    if (var == NULL) {
+        return NGX_ERROR;
+    }
+    var->get_handler = ngx_http_operationid_get_variable;
+    return NGX_OK;
+}
+static ngx_int_t
+ngx_http_operationid_init_worker(ngx_cycle_t *cycle)
+{
+    struct timeval  tp;
+    ngx_gettimeofday(&tp);
+    start_value = ((tp.tv_usec / 20) << 16) | ngx_pid;
+    return NGX_OK;
+}
+#include "stdafx.h"
+#include "WaitDlg.h"
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+ CWaitDlg dialog
+CWaitDlg::CWaitDlg(CWnd* pParent )
+	: CDialog(CWaitDlg::IDD, pParent)
+{
+}
+void CWaitDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialog::DoDataExchange(pDX);
+}
+BEGIN_MESSAGE_MAP(CWaitDlg, CDialog)
+END_MESSAGE_MAP()
+#define BLOCKNUM 50
+#define BLOCKLEN 32768 
+#define FILE_CLOSE(x)  if(x) { mmioClose(x, NULL);x=NULL;}
+#define RELEASE_AV8BUFFER  if(g_pBuffer) {g_pBuffer->Stop();delete g_pBuffer;g_pBuffer = NULL;}
+#define RELEASE_CVIDEOPLAY if(pVideoPlay){pVideoPlay->StopPlay();delete 
+pVideoPlay;pVideoPlay=NULL;}
+extern CMenu PopMenu;
+BOOL m_Capture=FALSE;  
+CAV8Buffer *g_pBuffer = NULL;
+HMMIO hmmioOutput;    
+HMMIO hmmioSendOutput;      
+CString CapFileName;  
+BOOL m_FileSend=FALSE;   
+CEvent g_eventFileStopSend;  
+CEvent g_eventRealSend(FALSE,TRUE,NULL,NULL);   
+CEvent g_eventClearup;   
+HWND hWnd ;
+float  m_size=0.00;     
+CString SendFilePath="";
+#define WM_CAPTURE_STOP WM_USER+1000   
+DWORD SendData(LPWSABUF stWSABuf)
+{
+    CString msg;
+	DWORD cbRet;
+    cbRet = 0;
+    CPlayApp* pApp=(CPlayApp*)AfxGetApp();
+	int status = WSASendTo (MultiSock,  
+		  stWSABuf,						
+		  1,                      
+		  cbRet,                 
+		  0,					
+		  (struct sockaddr FAR *)&DestAddr,
+		  sizeof(DestAddr), 
+		  NULL,	                 
+		  NULL);                   
+	if (status == SOCKET_ERROR) 
+	{
+		  AfxMessageBox("WSASendTo() Error");
+		  return -1;
+	}
+	return cbRet;
+}
+UINT FileSendThread(LPVOID pParam)
+{
+	CFile  hFile; 
+	DWORD dwFlags;
+	DWORD SendLen;
+	DWORD dwReadLength;
+	DWORD dwBytesRead;
+	int status;
+	WSABUF SendBuf;
+	dwReadLength=BUFSIZE;   
+	SendBuf.buf=(char *)malloc(BUFSIZE);
+		status=hFile.Open(SendFilePath,CFile::modeRead);
+	dwFlags = MMIO_CREATE | MMIO_WRITE;
+	if(status==0)
+	{
+		free(SendBuf.buf);
+		return -1;
+	}
+	else
+	{
+		while(1)
+		{
+			dwBytesRead=hFile.Read(SendBuf.buf,dwReadLength);
+			if(dwBytesRead==0)
+			{
+				hFile.Close();
+				free(SendBuf.buf);
+				AfxMessageBox;
+				break;
+			}
+			SendBuf.len = dwBytesRead;
+			SendLen=SendData(&SendBuf);
+			if(::WaitForSingleObject(g_eventFileStopSend,0)==WAIT_OBJECT_0)
+			{
+				hFile.Close();
+				free(SendBuf.buf); 
+				AfxMessageBox;
+				break;
+			}
+			Sleep(250);
+		}
+	}
+	m_FileSend=FALSE; 
+		return 0;
+}
+UINT RealSendThread(LPVOID pParam)
+{
+	int temp;
+    LPWSABUF RealSendBuf = (LPWSABUF)pParam;
+	g_eventRealSend.ResetEvent(); 
+	temp=SendData(RealSendBuf);
+	if(hmmioSendOutput)
+	    mmioWrite(hmmioSendOutput, (LPSTR) RealSendBuf->buf,temp);
+    free(RealSendBuf->buf);
+	GlobalFreePtr(RealSendBuf);	
+	g_eventRealSend.SetEvent();
+	return 0;
+}
+IMPLEMENT_DYNCREATE(CPlayView, CView)
+BEGIN_MESSAGE_MAP(CPlayView, CView)
+	ON_WM_SIZE()
+	ON_WM_CONTEXTMENU()
+	ON_COMMAND(ID_POP_FILE_SEND, OnPopFileSend)
+	ON_COMMAND(ID_POP_REAL_SEND, OnPopRealSend)
+	ON_COMMAND(ID_POP_SEND_STOP, OnPopSendStop)
+	ON_COMMAND(ID_CAPTURE_SAVE, OnCaptureSave)
+	ON_COMMAND(ID_BEGIN_CAPTURE, OnBeginCapture)
+	ON_COMMAND(ID_STOP_CAPTURE, OnStopCapture)
+	ON_COMMAND(ID_OPEN_PLAYFILE, OnOpenPlayfile)
+	ON_COMMAND(ID_PLAYFILE, OnPlayfile)
+	ON_COMMAND(ID_FILE_STOP, OnFileStop)
+	ON_COMMAND(ID_REALPLAY, OnRealplay)
+	ON_COMMAND(ID_REAL_STOP, OnRealStop)
+	ON_WM_TIMER()
+	ON_COMMAND(ID_PAUSE_PLAY, OnPausePlay)
+	ON_COMMAND(ID_RESUME_PLAY, OnResumePlay)
+	ON_WM_ERASEBKGND()
+	ON_COMMAND(ID_PAUSE_CAPTURE, OnPauseCapture)
+	ON_COMMAND(ID_RESUME_CAPTURE, OnResumeCapture)
+	ON_MESSAGE(WM_VIEW_OUTBAR_NOTIFY, OnOutbarNotify)
+	ON_MESSAGE(WM_PLAYOVER,OnPlayOver)
+	ON_MESSAGE(WM_READYSEND,OnReadyRealSend)
+	ON_MESSAGE(WM_PREPARE_CLOSE,OnPrepareClose)
+	ON_MESSAGE(WM_CAPTURE_STOP,OnCaptureStop)
+END_MESSAGE_MAP()
+LRESULT CPlayView::OnCaptureStop(WPARAM wParam, LPARAM lParam)
+{
+    OnStopCapture();
+	MessageBox;
+    m_SizeCheck=FALSE;
+	return 0;  
+}
+LRESULT CPlayView::OnOutbarNotify(WPARAM wParam, LPARAM lParam)
+{
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+	switch (wParam)
+	{
+	case NM_OB_ITEMCLICK:
+		{
+			int nFolder =pFrame->m_wndOutlookBar.GetSelFolder();
+			int nIndex  = (int)lParam;
+			switch (nFolder)
+			{
+			case PLAY: 
+				{
+					switch (nIndex)
+					{
+					case Play_Set:
+						break;
+					case Play_Open:
+						OnOpenPlayfile();				
+						break;
+					case Play_Begin:
+						OnPlayfile();
+						break;
+					case Play_Pause:
+						pVideoPlay->PausePlay();
+						KillTimer(ID_TIMER);
+						pFrame->m_wndStatusBar.SetPaneText;
+						break;
+					case Play_Resume:
+						pVideoPlay->ResumePlay();
+						SetTimer(ID_TIMER,1000,NULL);
+						pFrame->m_wndStatusBar.SetPaneText;
+						break;
+					case Play_Stop:
+						OnFileStop();
+						break;
+					}
+				}
+				break;
+		 case CAPTURE: 
+					switch (nIndex)
+					{
+					case Cap_Preview:
+						OnRealplay();
+						break;
+					case Cap_Set:
+						OnCaptureSave();
+						break;
+					case Cap_Begin:
+						OnBeginCapture();
+						break;
+					case Cap_Stop:
+						OnStopCapture();
+						break;
+					}
+				}
+				break;
+			}
+		}
+	}
+	return 0;
+}
+LRESULT CPlayView::OnPrepareClose(WPARAM wParam, LPARAM lParam)
+{
+    RELEASE_CVIDEOPLAY;
+   	ClearDriver();
+   	if(m_FileSend)
+       g_eventFileStopSend.SetEvent();
+    if(m_RealSend)
+      ::WaitForSingleObject(g_eventRealSend,INFINITE);
+    RELEASE_AV8BUFFER;
+	FILE_CLOSE(hmmioOutput);
+	FILE_CLOSE(hmmioSendOutput);
+	g_eventClearup.SetEvent();
+    return 0;
+}
+CPlayView::CPlayView()
+{
+	SendCounter=0; 
+	hWnd=m_hWnd;
+	m_hVFDrv=NULL;
+	m_RealSend=FALSE; 
+	m_TPlayFile=FALSE;
+	m_TCapture=FALSE;
+		m_SizeCheck=FALSE;
+	m_TimeCheck=FALSE;
+	m_time=0;
+	m_TimeIndex=0;
+	Fname="";
+		Ts=CTimeSpan(0,0,0,0);
+	Pos=0;
+	m_font.CreatePointFont;
+}
+CPlayView::~CPlayView()
+{
+ }
+void CPlayView::OnDraw(CDC* pDC)
+{
+	CPlayDoc* pDoc = GetDocument();
+	ASSERT_VALID(pDoc);
+}
+#ifdef _DEBUG
+void CPlayView::AssertValid() const
+{
+	CView::AssertValid();
+}
+void CPlayView::Dump(CDumpContext& dc) const
+{
+	CView::Dump(dc);
+}
+CPlayDoc* CPlayView::GetDocument() 
+{
+	ASSERT(m_pDocument->IsKindOf(RUNTIME_CLASS(CPlayDoc)));
+	return (CPlayDoc*)m_pDocument;
+}
+#endif //_DEBUG
+void CPlayView::CalcWindowRect(LPRECT lpClientRect, UINT nAdjustType) 
+{
+	CView::CalcWindowRect(lpClientRect, nAdjustType);
+}
+void CPlayView::OnSize(UINT nType, int cx, int cy) 
+{
+	CView::OnSize(nType, cx, cy);
+	RECT grc;
+	if(pVideoPlay)
+	{
+		if(pVideoPlay->pivw)
+		{
+			GetClientRect(&grc); 
+			pVideoPlay->pivw->SetWindowPosition(grc.left, grc.top, grc.right, 
+grc.bottom);
+		}
+	}
+}
+void CPlayView::OnContextMenu(CWnd* pWnd, CPoint point) 
+{
+	PopMenu.GetSubMenu(0)->TrackPopupMenu(TPM_RIGHTBUTTON|TPM_LEFTALIGN,point.x,point.y,this);  
+}
+void CPlayView::OnPopFileSend() 
+{
+	CFileDialog dlg;
+	dlg.m_ofn.lpstrTitle;
+	if(dlg.DoModal()==IDOK)
+	{
+	    SendFilePath=dlg.GetPathName();
+		m_FileSend=TRUE;
+		AfxBeginThread(FileSendThread,NULL);
+		CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+		pFrame->m_wndStatusBar.SetPaneText;
+	}
+}
+ wParam,LPARAM lParam)
+{
+	LPWSABUF stWSABuf;
+	stWSABuf=(LPWSABUF)GlobalAllocPtr(GHND,sizeof(WSABUF));
+	stWSABuf->buf = (char *)malloc(BUFSIZE); 
+	if (g_pBuffer) 
+		g_pBuffer->PopOut ((LPSTR)stWSABuf->buf, BUFSIZE);
+	stWSABuf->len = BUFSIZE;
+	::WaitForSingleObject(g_eventRealSend,INFINITE);
+	AfxBeginThread(RealSendThread,stWSABuf); 
+	return 0;
+}
+void CPlayView::OnPopRealSend() 
+{
+	DWORD dwFlags;
+	if (! g_pBuffer)
+	   	g_pBuffer = new CAV8Buffer(BLOCKNUM, BLOCKLEN);
+	if((!m_RealSend)&&(!m_Capture))
+	{
+	    if(InitDriver()<0)
+	   		return;
+	}
+	dwFlags = MMIO_CREATE | MMIO_WRITE;
+	hmmioSendOutput = mmioOpen("temp.mpg", (LPMMIOINFO)NULL, dwFlags);
+	m_RealSend=TRUE;
+	g_eventRealSend.SetEvent();	
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+   	pFrame->m_wndStatusBar.SetPaneText;
+}
+void CPlayView::OnPopSendStop() 
+{
+	if(m_FileSend)
+		g_eventFileStopSend.SetEvent();
+	if(m_RealSend)
+	{
+		if(!m_Capture)
+			ClearDriver();
+		RELEASE_AV8BUFFER;
+		::WaitForSingleObject(g_eventRealSend,INFINITE);//
+		FILE_CLOSE(hmmioSendOutput);
+		m_RealSend=FALSE;
+	}
+	CMainFramepFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText;   
+}
+WORD CALLBACK _loadds MyCallBack(HDRVR hdrvr, UINT msg, DWORD dwUser, DWORD dwParam1, DWORD dwParam2)
+{
+	if(msg==VF_MSGUSER_BUF_WRITE)
+	{
+		LONG lRet;
+		MMIOINFO    mmioinfoIn;
+		LPVF_BUFWRITE_STRUCT lpBufWrite = (LPVF_BUFWRITE_STRUCT)dwParam1;
+		if (g_pBuffer)
+			DWORD dwBytes = g_pBuffer->PushIn((LPSTR)lpBufWrite -> lpBuffer, (DWORD)lpBufWrite -> dwBufferWrite);
+		if (m_Capture)
+			if(hmmioOutput)
+			{
+				lRet = mmioWrite(hmmioOutput, (LPSTR)lpBufWrite -> lpBuffer, (LONG)lpBufWrite -> dwBufferWrite);
+				mmioGetInfo(hmmioOutput,&mmioinfoIn, 0);
+				if(mmioinfoIn.lDiskOffset>(m_size*1024*1024))
+					::SendMessage(hWnd,WM_CAPTURE_STOP,0,0);		
+			}
+			if (lRet == -1L)
+	return (FALSE);	
+	}
+	return 1;
+}
+int CPlayView::InitDriver()
+{
+    WORD flags;
+    m_hVFDrv = OpenDriver (L"av8api.dll", NULL, NULL);
+    if (!m_hVFDrv)
+    {
+		MessageBox("Can't OpenDriver()");
+        return -1;
+	}
+    if (!HVFAssign(m_hVFDrv, 0))
+    {
+        MessageBox;
+        return -1;
+    }
+	HVFLock(m_hVFDrv, VF_CAP_ALL);
+    flags = VF_FLAG_MPEG | VF_FLAG_ENCODE | VF_FLAG_OUTBUF;
+    m_bStream = static_cast<BYTE> (HVFOpen(m_hVFDrv, flags, 
+		reinterpret_cast<unsigned long>(MyCallBack)));
+   	InitEncodeVideoVxD();
+    InitEncodeAudioVxD(); 
+	if (m_bStream) 
+        HVFRecord(m_hVFDrv, m_bStream, NULL, NULL);
+	return 0;
+}
+void CPlayView::ClearDriver()
+{
+    m_bStream = 0;
+    if (m_hVFDrv)
+    {
+		HVFStop(m_hVFDrv, m_bStream);
+        HVFClose(m_hVFDrv, m_bStream);
+        HVFUnlock(m_hVFDrv, VF_CAP_ALL);
+        CloseDriver(m_hVFDrv, NULL, NULL);
+        m_hVFDrv = 0;
+		m_Capture=FALSE;
+     }
+}
+void CPlayView::InitEncodeVideoVxD()
+{
+    DWORD dwValue;
+    WORD  wWidth, wHeight;	
+    wWidth  = 352;
+    wHeight = 288;
+    dwValue = MAKELONG(wWidth, wHeight);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_OUTPUTSIZE, dwValue);	
+    wWidth = (wWidth * 45) / 44; 
+    dwValue = MAKELONG(wWidth, wHeight);)
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_INPUTSIZE, dwValue);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_BITRATE, BITRATE_DEFAULT)
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_RATE, VF_FLAG_VID_25);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_IINTERVAL, IINTERVAL_DEFAULT);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_BINTERVAL, PINTERVAL_DEFAULT);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_MODE, VF_FLAG_VID_PAL);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_SOURCE, VF_FLAG_VID_COMPOSITE);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_ALGORITHM, VF_FLAG_VID_MPEG);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_BRIGHTNESS, BRIGHTNESS_DEFAULT);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_CONTRAST, CONTRAST_DEFAULT);
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_HUE, HUE_DEFAULT);		
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_VID_SATURATION, SATURATION_DEFAULT);
+}
+void CPlayView::DiskSpace(TCHAR sDriver)
+{
+	struct _diskfree_t diskfree;
+	int nDriver =sDriver-'A'+1; 
+	if (_getdiskfree(nDriver, diskfree) == 0)
+	{
+		FreeDiskSpace.Format
+			(DWORD)diskfree.avail_clusters *
+			(DWORD)diskfree.sectors_per_cluster *
+			(DWORD)diskfree.bytes_per_sector / ((DWORD)1024L*(DWORD)1024L));
+	}
+	else
+		return;
+}
+void CPlayView::OnCaptureSave() 
+{
+	CString strCaptureSave;
+	TCHAR Driver;
+	CMainFrame pFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	FileDlg.m_ofn.lpstrInitialDir="c:\\temp";
+	CStopModeDlg StopModeDlg;
+	FileDlg.m_ofn.lpstrTitle;
+	if(FileDlg.DoModal()==IDOK)
+	{
+		CapFileName=FileDlg.GetPathName();
+        Driver=CapFileName.GetAt(0);
+        strCaptureSave.Format;
+		DiskSpace(Driver);
+        CMainFramepFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+        pFrame->m_wndStatusBar.SetPaneText(1,strCaptureSave);
+		pFrame->m_wndStatusBar.SetPaneText(2,FreeDiskSpace);
+        if(StopModeDlg.DoModal()==IDOK)
+		{ 
+			if(StopModeDlg.m_SizeCheck)
+			{
+				sscanf(StopModeDlg.m_size,"%f",&m_size);
+				m_SizeCheck=StopModeDlg.m_SizeCheck;
+			}
+			if(StopModeDlg.m_TimeCheck)
+			{
+				sscanf(StopModeDlg.m_time,"%d",&m_time);
+				m_TimeCheck=StopModeDlg.m_TimeCheck;
+			}
+		}
+	}
+}void CPlayView::OnBeginCapture() 
+{
+	DWORD dwFlags = 0;
+    RECT Srct,Erct,Prct;
+    int width;
+    UINT Sid;
+    UINT SStyle;
+	if((!m_RealSend)&&(!m_Capture))
+	   if(InitDriver()<0)
+	    	return;
+    m_Capture=TRUE;
+	LPSTR caFileName=CapFileName.GetBuffer(_MAX_PATH);
+	CapFileName.ReleaseBuffer();
+	dwFlags = MMIO_CREATE | MMIO_WRITE;
+	hmmioOutput = mmioOpen(caFileName, (LPMMIOINFO)NULL, dwFlags);
+ 	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText(0,"");
+	pFrame->m_wndStatusBar.GetPaneInfo(0,Sid,SStyle,width);
+ 	::GetClientRect(pFrame->m_wndStatusBar.m_hWnd,&Prct);
+	Srct.left=10;
+    Srct.top=4;
+    Srct.right=width/2-20;
+    Srct.bottom=Prct.bottom-1;
+    Erct.left=width/2;
+    Erct.top=4;
+ 	Erct.right=width-10;
+ 	Erct.bottom=Prct.bottom-1;
+	m_static.SetFont(&m_font);
+	m_edit.Create(ES_CENTER|WS_BORDER|WS_VISIBLE,Erct,&pFrame->m_wndStatusBar,ID_EDIT)
+    m_edit.SetWindowText("00:00:00");
+    m_TCapture=TRUE;
+	SetTimer(ID_TIMER,1000,NULL);	
+}
+void CPlayView::OnStopCapture() 
+{
+    KillTimer(ID_TIMER);
+    m_TCapture=FALSE;
+	if(!m_RealSend)
+		ClearDriver();
+   	FILE_CLOSE(hmmioOutput);
+	Ts=CTimeSpan(0,0,0,0);
+	m_static.DestroyWindow();
+	m_edit.DestroyWindow();
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+ 	pFrame->m_wndStatusBar.SetPaneText;
+}void CPlayView::OnPauseCapture() 
+{
+	KillTimer(ID_TIMER);
+    m_TCapture=FALSE;_bStream);
+	CMainFrame* pFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText;
+}
+void CPlayView::OnResumeCapture() 
+{
+	HVFResume(m_hVFDrv, m_bStream);
+	m_TCapture=TRUE;
+	SetTimer(ID_TIMER,1000,NULL);
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText(0,"");
+}void CPlayView::OnOpenPlayfile() 
+{
+	CString FTemp;	 	
+	CFileDialog dlg;
+	dlg.m_ofn.lpstrTitle;
+	CMainFramepFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	if(dlg.DoModal()==IDOK)
+	{
+	    Fname=dlg.GetPathName();
+	   	FTemp.Format;
+		pFrame->m_wndStatusBar.SetPaneText;
+    	pFrame->m_wndStatusBar.SetPaneText;
+	} 	
+}
+void CPlayView::OnPlayfile() 
+{
+ 	int width;
+ 	UINT Sid;
+    UINT SStyle;
+	CMainFrame* pFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	if(!pVideoPlay)
+		pVideoPlay=new CVideoPlay(this->m_hWnd);
+   	pFrame->m_wndStatusBar.SetPaneText;
+ 	pFrame->m_wndStatusBar.GetPaneInfo(0,Sid,SStyle,width);
+ 	::GetClientRect(pFrame->m_wndStatusBar.m_hWnd,&Srct);
+    Prct.left=40;
+ 	Prct.top=4;
+ 	Prct.right=width;
+ 	Prct.bottom=Srct.bottom-1;
+ 	m_prog.Create(PBS_SMOOTH,Prct,&pFrame->m_wndStatusBar,ID_PROGRESS);
+   	pVideoPlay->PlayFromFile(Fname);  
+	m_prog.SetRange(0,(int)pVideoPlay->tLength);
+    m_prog.ShowWindow(SW_SHOW);
+	m_TPlayFile=TRUE;
+ 	SetTimer(ID_TIMER,1000,NULL);
+}LRESULT CPlayView::OnPlayOver(WPARAM wParam,LPARAM lParam)
+{
+	int status;
+	status=pVideoPlay->PlayOver();
+	if(status==0)
+	{
+		KillTimer(ID_TIMER);
+		m_prog.DestroyWindow();
+		CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+		pFrame->m_wndStatusBar.SetPaneText;
+		Pos=0;
+		Ts=CTimeSpan(0,0,0,0);
+		m_TPlayFile=FALSE;
+	}
+	return 0;
+}
+void CPlayView::OnFileStop() 
+{
+	KillTimer(ID_TIMER);
+	m_prog.DestroyWindow();
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText;
+    Pos=0;
+    Ts=CTimeSpan(0,0,0,0);
+	m_TPlayFile=FALSE;
+}
+void CPlayView::OnRealplay() 
+{
+	int i,MenuCount;
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+    pVideoPlay=new CVideoPlay(this->m_hWnd);
+	pVideoPlay->RealPlay();
+	pFrame->m_wndStatusBar.SetPaneText;
+	pFrame->m_wndStatusBar.SetPaneText(1,"");
+	CMenu* pSubMenu=PopMenu.GetSubMenu(0);
+	MenuCount=pSubMenu->GetMenuItemCount();	
+	for(i=0;i<2;i++)
+		pSubMenu->EnableMenuItem(i,MF_ENABLED|MF_BYPOSITION); 
+}
+void CPlayView::OnRealStop() 
+{
+	CMainFrame pFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText(0,"");
+	RELEASE_CVIDEOPLAY;
+}
+void CPlayView::OnTimer(UINT nIDEvent) 
+{
+	Ts=TsAdd+Ts;
+	if(m_TPlayFile)
+	{
+		CString s1 =Ts.FormatPos=Pos+1;
+		m_prog.SetPos(Pos);
+		CDC* pControlDC=m_prog.GetDC();  
+		CFontpOldFont = (CFont) pControlDC->SelectObject(m_font); 
+		int iOld = pControlDC->GetBkMode();
+		int iOldMode = pControlDC->GetROP2();
+		pControlDC->SetROP2(R2_XORPEN);
+		CRect rc;
+		m_prog.GetClientRect(rc);
+		pControlDC->SetBkMode(TRANSPARENT);
+		m_prog.Invalidate();
+		m_prog.UpdateWindow();
+		pControlDC->DrawText(s1, rc, DT_CENTER | DT_VCENTER);
+		pControlDC->SelectObject(pOldFont);
+		pControlDC->SetROP2(iOldMode);
+		pControlDC->SetBkMode(iOld);
+		m_prog.ReleaseDC(pControlDC);
+	}
+	if(m_TCapture)
+	{
+		CString s2 =Ts.Format
+		m_edit.SetWindowText(s2);
+		if(m_TimeCheck)
+		{
+			m_TimeIndex++;
+			if(m_TimeIndex==m_time+1)
+			{
+				OnStopCapture();
+				MessageBox;
+				m_TimeCheck=FALSE;
+				m_TimeIndex=0;
+			}
+		}
+	}
+	CView::OnTimer(nIDEvent);
+}
+void CPlayView::OnPausePlay() 
+{
+	pVideoPlay->PausePlay();
+	KillTimer(ID_TIMER);
+	CMainFrame pFrame=(CMainFrame)AfxGetApp()->m_pMainWnd;
+	pFrame->m_wndStatusBar.SetPaneText;
+}
+void CPlayView::OnResumePlay() 
+{
+	pVideoPlay->ResumePlay();
+	SetTimer(ID_TIMER,1000,NULL);
+	CMainFrame* pFrame=(CMainFrame*)AfxGetApp()->m_pMainWnd;
+    pFrame->m_wndStatusBar.SetPaneText;
+}
+void CPlayView::InitEncodeSystemVxD()
+{
+    HVFSet(m_hVFDrv, m_bStream, VF_INDEX_STM_TYPE, VF_FLAG_MPGSYS);
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_STM_ENCODEMODE, VF_FLAG_STM_NORMAL);
+}
+IMPLEMENT_DYNAMIC(CMyEdit,CEdit)
+CMyEdit::CMyEdit()
+{
+	m_clrFont =RGB(0 , 255 , 0) ; 
+	m_clrBack=RGB(0 , 0 , 0) ; 
+	m_brush.CreateSolidBrush(m_clrBack); 
+	m_font.CreatePointFont;
+}
+CMyEdit::CMyEdit()
+{
+}
+BEGIN_MESSAGE_MAP(CMyEdit, CEdit)
+	ON_WM_CREATE()
+	ON_WM_CTLCOLOR_REFLECT()
+int CMyEdit::OnCreate(LPCREATESTRUCT lpCreateStruct) 
+{
+	if (CEdit::OnCreate(lpCreateStruct) == -1)
+		return -1;
+	return 0;
+}
+HBRUSH CMyEdit::CtlColor(CDC* pDC, UINT nCtlColor) 
+{
+	pDC->SetTextColor (m_clrFont); 
+    pDC->SetBkMode(TRANSPARENT); 
+    return (HBRUSH)m_brush.GetSafeHandle (); 
+}
+void CPlayView::InitEncodeAudioVxD()
+{
+    DWORD dwValue;
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_AUD_SAMPLE, SAMPLE_RATE_DEFAULT);
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_AUD_BITRATE, BIT_RATE_DEFAULT);
+	dwValue=VF_FLAG_AUD_MPEG;	
+	dwValue=(dwValue<<16)+VF_FLAG_AUD_NONE;
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_AUD_MODE, MODE_DEFAULT);
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_AUD_VOLUME, VOLUME_DEFAULT);
+	HVFSet(m_hVFDrv, m_bStream, VF_INDEX_AUD_GAIN, GAIN_DEFAULT);
+}
+BOOL CPlayView::OnEraseBkgnd(CDC* pDC) 
+{
+	CBrush Brush (RGB (0,0,255) ); 
+	CBrushpOldBrush = pDC->SelectObject(Brush); 
+	CRect reClip ; 
+	pDC->GetClipBox(reClip); 
+	pDC->PatBlt (reClip.left , reClip.top , 
+    reClip.Width ( ) , reClip.Height ( ) , PATCOPY ); 
+	pDC->SelectObject (pOldBrush ); 
+	return TRUE; 
+}
+CVideoPlay::CVideoPlay(HWND hwnd)
+{
+   pigb  = NULL;
+   pimc  = NULL;
+   pimex = NULL;
+   pivw  = NULL;
+   pmp   = NULL;
+   pVCap = NULL;
+   CappFg = NULL;
+   CapPigb = NULL;
+   m_hwnd=hwnd;
+}
+CVideoPlay::~CVideoPlay()
+{
+  HELPER_RELEASE(pivw);
+  HELPER_RELEASE(pigb);
+  HELPER_RELEASE(pimc);
+  HELPER_RELEASE(pimex);
+  HELPER_RELEASE(pmp);
+  HELPER_RELEASE(CapPigb);
+  HELPER_RELEASE(CappFg);
+  HELPER_RELEASE(pVCap);
+}
+void CVideoPlay::RealPlay()
+{
+	HRESULT hr;
+	CHECK_ERROR(CoCreateInstance((REFCLSID)CLSID_CaptureGraphBuilder,NULL,
+				CLSCTX_INPROC, (REFIID)IID_ICaptureGraphBuilder,(void )CapPigb),
+				"CoCreateInstance Error");
+	CHECK_ERROR(hr=CoCreateInstance(CLSID_FilterGraph, NULL, CLSCTX_INPROC,
+		        IID_IGraphBuilder, (LPVOID )CappFg),"Cannot instantiate filtergraph");
+	hr = CapPigb->SetFiltergraph(CappFg);
+	if (hr != NOERROR)
+	{
+    	MessageBox(m_hwnd,"Cannot give graph to builder","Error",MB_OK);
+        return;
+	}
+	int uIndex=0;
+	ICreateDevEnum pCreateDevEnum;
+	hr = CoCreateInstance(CLSID_SystemDeviceEnum, NULL, CLSCTX_INPROC_SERVER,
+			  IID_ICreateDevEnum, (void)pCreateDevEnum);
+	IEnumMoniker pEm;
+	hr = pCreateDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory,
+	pEm, 0);
+	HELPER_RELEASE(pCreateDevEnum);
+	pEm->Reset();
+	ULONG cFetched;
+	IMoniker pM;
+	while(hr = pEm->Next(1, pM, cFetched), hr==S_OK)
+    {
+		hr = pM->BindToObject(0, 0, IID_IBaseFilter, (void)pVCap);
+		if(pVCap== NULL) 
+		{
+		    MessageBox(m_hwnd,"Cannot get the capture filterr","Error",MB_OK);
+			return;
+		}
+		HELPER_RELEASE(pM);
+		uIndex++;
+    }
+	HELPER_RELEASE(pEm);
+	if(pVCap)
+		hr = CappFg->AddFilter(pVCap, NULL); 
+	if (hr != NOERROR) 
+	{
+    	MessageBox(m_hwnd,"Cannot add vidcap to filtergraph","Error",MB_OK);
+		return;
+	}
+	hr = CapPigb->RenderStream(PIN_CATEGORY_PREVIEW,pVCap,NULL, NULL);
+	if (hr != S_OK)
+	{
+	    MessageBox(m_hwnd,"This graph cannot preview properly","Error",MB_OK);
+		return;
+	}
+    hr =CapPigb->FindInterface(&PIN_CATEGORY_PREVIEW,pVCap,IID_IVideoWindow,(void )&pivw);
+    if (hr != NOERROR) 
+	{
+      	MessageBox(m_hwnd,"cannot find Video Window properly","Error",MB_OK);
+		return;
+	} 
+	else 
+	{
+		DisplayVideoWin(); 
+  	}
+    hr =CappFg->QueryInterface(IID_IMediaControl, (void **)&pimc);
+    if (SUCCEEDED(hr)) 
+	{
+	   hr = pimc->Run(); 
+	}
+	else
+	{
+        MessageBox(m_hwnd,"Cannot run preview graph","Error",MB_OK);
+	    return;
+	}
+}
+void CVideoPlay::DisplayVideoWin()
+{
+	RECT grc;
+    if(pivw)
+	{
+		pivw->put_Owner((OAHWND)m_hwnd);
+	    pivw->put_WindowStyle(WS_CHILD|WS_CLIPSIBLINGS|WS_CLIPCHILDREN);
+        ::GetClientRect(m_hwnd, grc);; 
+	    pivw->SetWindowPosition(grc.left, grc.top, grc.right, grc.bottom);
+        pivw->put_Visible(OATRUE);
+	}     
+}
+void CVideoPlay::StopPlay()
+{
+     if(pimc)
+	{
+		pimc->Stop();  
+		HELPER_RELEASE(pimc);
+	}
+	if (pivw)
+    {   
+        pivw->put_Visible(OAFALSE);
+        pivw->put_Owner(NULL);
+        HELPER_RELEASE(pivw);
+	}
+	HELPER_RELEASE(CapPigb);
+    HELPER_RELEASE(CappFg);
+    HELPER_RELEASE(pVCap);	
+}
+void CVideoPlay::PlayFromFile(CString szFile)
+{
+      WCHAR wFile[MAX_PATH];
+	  HRESULT   hr;
+	  MultiByteToWideChar( CP_ACP, 0, szFile.GetBuffer(_MAX_PATH), -1, wFile, MAX_PATH );
+      szFile.ReleaseBuffer();
+      CHECK_ERROR(::CoCreateInstance(CLSID_FilterGraph, NULL, CLSCTX_INPROC_SERVER, 
+		           IID_IGraphBuilder, (void)&pigb),"CoCreateInstance Error") ;
+      pigb->QueryInterface(IID_IMediaControl, (void )&pimc); 
+      hr=pigb->QueryInterface(IID_IMediaEventEx, (void)&pimex);
+      pigb->QueryInterface(IID_IVideoWindow, (void )pivw);
+      hr=pigb->QueryInterface(IID_IMediaPosition, (void) pmp);
+      hr = pigb->RenderFile(wFile, NULL);
+	  if (SUCCEEDED(hr)) 	           
+         hr=pmp->get_Duration(tLength);  
+	  DisplayVideoWin();    
+	  if (SUCCEEDED(hr))
+         pimc->Run();     
+	  pimex->SetNotifyWindow((OAHWND)m_hwnd, WM_PLAYOVER, 0);
+}
+int CVideoPlay::PlayOver()
+{
+  long evCode,evParam1,evParam2;
+  HRESULT   hr;
+  if(pimex)
+  {
+  while (SUCCEEDED(pimex->GetEvent(evCode, evParam1, evParam2, 0)))
+      { 
+               hr = pimex->FreeEventParams(evCode, evParam1, evParam2);
+                if (EC_COMPLETE == evCode)
+                  { 
+                    if (pivw)
+                      { 
+                        pivw->put_Visible(OAFALSE);
+                        pivw->put_Owner(NULL);
+                        HELPER_RELEASE(pivw);
+                      } 
+                    HELPER_RELEASE(pigb);
+                    HELPER_RELEASE(pimc);
+                 	HELPER_RELEASE(pmp);
+				    HELPER_RELEASE(pimex);
+					return 0;
+				  break;
+				}
+   }
+  }
+  return -1;
+}
+void CVideoPlay::ResumePlay()
+{
+ 	HRESULT hr; 
+	hr = pmp->get_CurrentPosition(tCurrent);
+    if (SUCCEEDED(hr)) 
+	{
+       if ((tRemain=tLength - tCurrent) < 1) 
+         pmp->put_CurrentPosition(0);
+       else
+	     pmp->put_CurrentPosition(tCurrent);
+    }
+    if(pimc)
+	  	pimc->Run(); 
+}
+void CVideoPlay::PausePlay()
+{
+	if(pimc)
+		pimc->Pause();
+}
+void CVideoPlay::FindDevice(CStringList DevName)
+{
+    HRESULT hr;
+	int uIndex=0;
+	ICreateDevEnum pCreateDevEnum;  
+	hr = CoCreateInstance(CLSID_SystemDeviceEnum, NULL, CLSCTX_INPROC_SERVER,
+			  IID_ICreateDevEnum, (void)pCreateDevEnum);  
+    IEnumMoniker pEm;  
+    hr = pCreateDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory,
+						pEm, 0);
+    HELPER_RELEASE(pCreateDevEnum);
+	if(pEm)
+	{
+		pEm->Reset();
+		ULONG cFetched;
+		IMoniker pM;
+		while(hr = pEm->Next(1,pM, &cFetched), hr==S_OK)
+		{
+			IPropertyBag pBag;
+			hr = pM->BindToStorage(0, 0, IID_IPropertyBag, (void )&pBag);
+			if(SUCCEEDED(hr)) 
+			{
+				VARIANT var;
+				var.vt = VT_BSTR;
+				hr = pBag->Read(L"FriendlyName", var, NULL);
+				if (hr == NOERROR)
+				{
+					CString achName;
+					WideCharToMultiByte(CP_ACP, 0, var.bstrVal, -1, achName.GetBuffer(50),80,NULL, NULL);
+					achName.ReleaseBuffer();
+					DevName.AddTail(achName);		
+					SysFreeString(var.bstrVal);
+				}
+	  			HELPER_RELEASE(pBag);
+			}	
+			HELPER_RELEASE(pM);
+			uIndex++;
+		}
+   		HELPER_RELEASE(pEm);
+	}
+}
+CVideoPlay::CVideoPlay()
+{
+   pigb  = NULL;
+   pimc  = NULL;
+   pimex = NULL;
+   pivw  = NULL;
+   pmp   = NULL;
+   pVCap = NULL;
+   CappFg = NULL;
+   CapPigb = NULL;
+}
+const AMOVIESETUP_MEDIATYPE sudOpPinTypes =
+{ &MEDIATYPE_Stream     
+, &MEDIASUBTYPE_NULL }; 
+const AMOVIESETUP_PIN sudOpPin =
+{ L"Output"          
+, FALSE              
+, TRUE               
+, FALSE             
+, FALSE              
+, CLSID_NULL        
+, L"Input"           
+, sudOpPinTypes };  
+const AMOVIESETUP_FILTER sudAsync =
+{ CLSID_AsyncSample              
+, L"Sample File Source (Async.)"  
+, MERIT_UNLIKELY                  
+, 1                               
+, sudOpPin };  
+CFactoryTemplate g_Templates[1] = {
+    { L"Sample File Source (Async.)"
+    , CLSID_AsyncSample
+    , CAsyncFilter::CreateInstance
+    , NULL
+    , sudAsync }
+};
+int g_cTemplates = sizeof(g_Templates) / sizeof(g_Templates[0]);
+STDAPI DllRegisterServer()
+{
+    return AMovieDllRegisterServer2(TRUE);
+}
+STDAPI DllUnregisterServer()
+{
+    return AMovieDllRegisterServer2(FALSE);
+}
+extern "C" BOOL WINAPI DllEntryPoint(HINSTANCE, ULONG, LPVOID);
+BOOL APIENTRY DllMain(HANDLE hModule, 
+                      DWORD  dwReason, 
+                      LPVOID lpReserved)
+{
+	return DllEntryPoint((HINSTANCE)(hModule), dwReason, lpReserved);
+}
+{
+    ASSERT(phr);
+    return new CAsyncFilter(pUnk, phr);
+}
+BOOL CAsyncFilter::ReadTheFile(LPCTSTR lpszFileName)
+{
+    DWORD dwBytesRead;
+    HANDLE hFile = CreateFile(lpszFileName,
+                              GENERIC_READ,
+                              FILE_SHARE_READ,
+                              NULL,
+                              OPEN_EXISTING,
+                              0,
+                              NULL);
+    if (hFile == INVALID_HANDLE_VALUE) 
+    {
+        DbgLog((LOG_TRACE, 2, TEXT("Could not open %s\n"), lpszFileName));
+        return FALSE;
+    }
+    ULARGE_INTEGER uliSize;
+    uliSize.LowPart = GetFileSize(hFile,uliSize.HighPart);
+    PBYTE pbMem = new BYTE[uliSize.LowPart];
+    if (pbMem == NULL) 
+    {
+        CloseHandle(hFile);
+        return FALSE;
+    }
+    if (!ReadFile(hFile,
+                  (LPVOID) pbMem,
+                  uliSize.LowPart,
+                  &dwBytesRead,
+                  NULL) ||
+        (dwBytesRead != uliSize.LowPart))
+    {
+        DbgLog((LOG_TRACE, 1, TEXT("Could not read file\n")));
+        delete [] pbMem;
+        CloseHandle(hFile);
+        return FALSE;
+    }
+    m_pbData = pbMem;
+    m_llSize = (LONGLONG)uliSize.QuadPart;
+    CloseHandle(hFile);
+    return TRUE;
+}
+}
+HRESULT
+CAsyncRequest::Complete()
+{
+    m_pStream->Lock();
+    m_hr = m_pStream->SetPointer(m_llPos);
+    if(S_OK == m_hr)
+    {
+        DWORD dwActual;
+        m_hr = m_pStream->Read(m_pBuffer, m_lLength, m_bAligned, &dwActual);
+        if(m_hr == OLE_S_FIRST)
+        {
+            if(m_pContext)
+            {
+                IMediaSample *pSample = reinterpret_cast<IMediaSample *>(m_pContext);
+                pSample->SetDiscontinuity(TRUE);
+                m_hr = S_OK;
+            }
+        }
+        if(FAILED(m_hr))
+        {
+        }
+        else if(dwActual != (DWORD)m_lLength)
+        {
+            m_lLength = (LONG) dwActual;
+            m_hr = S_FALSE;
+        }
+        else
+        {
+            m_hr = S_OK;
+        }
+    }
+    m_pStream->Unlock();
+    return m_hr;
+}
+{
+    cmt->majortype = MEDIATYPE_Video;
+cmt->subtype = bPayload ? MEDIASUBTYPE_MPEG1Payload :   
+                          MEDIASUBTYPE_MPEG1Packet;
+    VIDEOINFO *videoInfo =
+        (VIDEOINFO)cmt->AllocFormatBuffer(FIELD_OFFSET(MPEG1VIDEOINFO, bSequenceHeader[pInfo->lActualHeaderLen]));
+    if (videoInfo == NULL) {
+        return E_OUTOFMEMORY;
+    }
+    RESET_HEADER(videoInfo);
+    videoInfo->dwBitRate          = pInfo->dwBitRate;
+    videoInfo->rcSource.right     = pInfo->lWidth;
+    videoInfo->bmiHeader.biWidth  = pInfo->lWidth;
+    videoInfo->rcSource.bottom    = pInfo->lHeight;
+    videoInfo->bmiHeader.biHeight = pInfo->lHeight;
+    videoInfo->bmiHeader.biXPelsPerMeter = pInfo->lXPelsPerMeter;
+    videoInfo->bmiHeader.biYPelsPerMeter = pInfo->lYPelsPerMeter;
+    videoInfo->bmiHeader.biSize   = sizeof(BITMAPINFOHEADER);
+    videoInfo->AvgTimePerFrame = pInfo->tPictureTime;
+    MPEG1VIDEOINFO *mpgvideoInfo = (MPEG1VIDEOINFO )videoInfo;
+    mpgvideoInfo->cbSequenceHeader = pInfo->lActualHeaderLen;
+    CopyMemory((PVOID)mpgvideoInfo->bSequenceHeader,
+               (PVOID)pInfo->RawHeader,
+               pInfo->lActualHeaderLen);
+    mpgvideoInfo->dwStartTimeCode = pInfo->dwStartTimeCode;
+    cmt->SetFormatType(&FORMAT_MPEGVideo);
+    return S_OK;
+}
+BOOL CheckAudioHeader(const BYTE * pbData)
+{
+#pragma message (REMIND("Check audio header"))
+    if ((pbData[2]0x0C) == 0x0C) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio sampling frequency")));
+        return FALSE;
+    }
+    if ((pbData[1]0x08) != 0x08) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio ID bit = 0")));
+        return FALSE;
+    }
+    if (((pbData[1] >> 1)3) == 0x00) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid audio Layer")));
+        return FALSE;
+    }
+    if (((pbData[2] >> 2)3) == 3) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid sample rate")));
+        return FALSE;
+    }
+    if ((pbData[2] >> 4) == 0x0F) {
+        DbgLog((LOG_ERROR, 2, TEXT("Invalid bit rate")));
+        return FALSE;
+    }
+    return TRUE;
+}
+LONG SampleRate(const BYTE * pbData)
+{
+    switch ((pbData[2] >> 2)3) {
+        case 0:
+            return 44100;
+        case 1:
+            return 48000;
+        case 2:
+            return 32000;
+        default:
+            DbgBreak("Unexpected Sample Rate");
+            return 44100;
+    }
+}
+BOOL ParseAudioHeader(const BYTEpbData, MPEG1WAVEFORMATpFormat)
+{
+    if (!CheckAudioHeader(pbData)) {
+        return FALSE;
+    }
+    pFormat->wfx.wFormatTag = WAVE_FORMAT_MPEG;
+    switch (pbData[3] >> 6) {
+    case 0x00:
+        pFormat->fwHeadMode = ACM_MPEG_STEREO;
+        break;
+    case 0x01:
+        pFormat->fwHeadMode = ACM_MPEG_JOINTSTEREO;
+        break;
+    case 0x02:
+        pFormat->fwHeadMode = ACM_MPEG_DUALCHANNEL;
+        break;
+    case 0x03:
+        pFormat->fwHeadMode = ACM_MPEG_SINGLECHANNEL;
+        break;
+    }
+{
+{
+    CloseThread();
+    POSITION pos = m_listDone.GetHeadPosition();
+    while(pos)
+    {
+        CAsyncRequest* pRequest = m_listDone.GetNext(pos);
+        delete pRequest;
+    }
+    m_listDone.RemoveAll();
+}
+HRESULT
+CAsyncIo::AsyncActive(void)
+{
+    return StartThread();
+}
+HRESULT
+CAsyncIo::AsyncInactive(void)
+{
+    return CloseThread();
+}
+HRESULT
+CAsyncIo::Request(             
+{
+    if(bAligned)
+    {
+        if(!IsAligned(llPos) ||
+            !IsAligned(lLength) ||
+            !IsAligned((LONG) pBuffer))
+        {
+            return VFW_E_BADALIGN;
+        }
+    }
+    CAsyncRequest* pRequest = new CAsyncRequest;
+    if (!pRequest)
+        return E_OUTOFMEMORY;
+    HRESULT hr = pRequest->Request(this,
+                                   m_pStream,
+                                   llPos,
+                                   lLength,
+                                   bAligned,
+                                   pBuffer,
+                                   pContext,
+                                   dwUser);
+    if(SUCCEEDED(hr))
+    {
+        hr = PutWorkItem(pRequest);
+    }
+    if(FAILED(hr))
+    {
+        delete pRequest;
+    }
+    return hr;
+}
+{
+    CheckPointer(ppContext,E_POINTER);
+    CheckPointer(pdwUser,E_POINTER);
+    CheckPointer(pcbActual,E_POINTER);  
+    {
+        if(!m_evDone.Wait(dwTimeout))
+        {
+            return VFW_E_TIMEOUT;
+        }     
+        {
+            HRESULT hr = pRequest->GetHResult();
+            if(hr == S_FALSE)
+            {e
+                if((pRequest->GetActualLength() +
+                    pRequest->GetStart()) == Size())
+                {
+                    hr = S_OK;
+                }
+                else
+                {
+                    hr = E_FAIL;
+                }
+            }
+            delete pRequest;
+            return hr;
+        }
+        else
+        {
+            CAutoLock lck(&m_csLists);
+            if(m_bFlushing && !m_bWaiting)
+            {
+    CheckPointer(pcbActual,E_POINTER);
+    if(!IsAligned(llPos) ||
+        !IsAligned(lLength) ||
+        !IsAligned((LONG) pBuffer))
+    {
+        return VFW_E_BADALIGN;
+    }
+    CAsyncRequest request;
+    HRESULT hr = request.Request(this,
+                                m_pStream,
+                                llPos,
+                                lLength,
+                                TRUE,
+                                pBuffer,
+                                pvContext,
+                                0);
+    if(FAILED(hr))
+        return hr;
+}
+{
+    CheckPointer(pllTotal,E_POINTER);
+    pllTotal = m_pStream->Size(pllAvailable);
+    return S_OK;
+}
+HRESULT
+CAsyncIo::BeginFlush()
+{
+    {
+        CAutoLock lock(m_csLists);
+        m_bFlushing = TRUE;     
+        {
+            preq->Cancel();
+            PutDoneItem(preq);
+        }
+        if(m_cItemsOut > 0)
+        {
+            ASSERT(!m_bWaiting);
+            m_bWaiting = TRUE;
+        }
+        else
+        {
+            m_evDone.Set();
+            return S_OK;
+        }
+    }
+    ASSERT(m_bWaiting);
+    for(;;)
+    {
+        m_evAllDone.Wait();
+        {
+            CAutoLock lock(&m_csLists);
+            if(m_cItemsOut == 0)
+            {
+                m_bWaiting = FALSE;
+                m_evDone.Set();
+                return S_OK;
+            }
+        }
+    }
+}
+HRESULT
+CAsyncIo::EndFlush()
+{   
+    m_bFlushing = FALSE;
+    ASSERT(!m_bWaiting);
+    if(m_listDone.GetCount() > 0)
+    {
+        m_evDone.Set();
+    }
+    else
+    {
+        m_evDone.Reset();
+    }
+    return S_OK;
+}
+HRESULT
+CAsyncIo::StartThread(void)
+{
+    if(m_hThread)
+    {
+        return S_OK;
+    }
+    DWORD dwThreadID;
+    m_hThread = CreateThread(NULL,
+                            0,
+                            InitialThreadProc,
+                            this,
+                            0,
+                            dwThreadID);
+    if(!m_hThread)
+    {
+        DWORD dwErr = GetLastError();
+        return HRESULT_FROM_WIN32(dwErr);
+    }
+    return S_OK;
+}
+HRESULT
+CAsyncIo::CloseThread(void)
+{
+    m_evStop.Set();
+    if(m_hThread)
+    {
+        WaitForSingleObject(m_hThread, INFINITE);
+        CloseHandle(m_hThread);
+        m_hThread = NULL;
+    }
+    return S_OK;
+}
+    return preq;
+}
+{
+        m_evDone.Reset();
+    }
+    return preq;
+}
+HRESULT
+CAsyncIo::PutWorkItem(CAsyncRequestpRequest)
+{
+    CAutoLock lock(&m_csLists);
+    HRESULT hr;
+    if(m_bFlushing)
+    {
+        hr = VFW_E_WRONG_STATE;
+    }
+    else if(m_listWork.AddTail(pRequest))
+    {
+        hr = StartThread();
+    }
+    else
+    {
+        hr = E_OUTOFMEMORY;
+    }
+    return(hr);
+}
+HRESULT
+CAsyncIo::PutDoneItem(CAsyncRequestpRequest)
+{
+    ASSERT(CritCheckIn(m_csLists));
+    if(m_listDone.AddTail(pRequest))
+    {
+        m_evDone.Set();
+        return S_OK;
+    }
+    else
+    {
+        return E_OUTOFMEMORY;
+    }
+}
+void
+CAsyncIo::ProcessRequests(void)
+{
+    CAs    for(;;)
+    {
+        {
+            CAutoLock lock(&m_csLists);
+            preq = GetWorkItem();
+            if(preq == NULL)
+            {
+                return;
+            }
+       }
+        preq->Complete();
+        {
+            if(--m_cItemsOut == 0)
+            {
+                if(m_bWaiting)
+                    m_evAllDone.Set();
+            }
+        }
+    }
+}
+DWORD
+CAsyncIo::ThreadProc(void)
+{
+    HANDLE ahev[] = {m_evStop, m_evWork};
+    for(;;)
+    {
+        if(dw == WAIT_OBJECT_0+1)
+        {
+        }
+        else
+        {
+            return 0;
+        }
+    }
+}
+        LONG cbUnused;
+        return SyncReadAligned(llPos, lLength, pBuffer, &cbUnused, NULL);
+    }
+    CAsyncRequest request;
+    HRESULT hr = request.Request(this,
+                                m_pStream,
+                                llPos,
+                                lLength,
+                                FALSE,
+                                pBuffer,
+                                NULL,
+     if(FAILED(hr))
+    {
+        return hr;
+    }
+    return request.Complete();
+}
+HRESULT
+CAsyncIo::Alignment(LONGpAlignment)
+{
+    CheckPointer(pAlignment,E_POINTER);
+    pAlignment = Alignment();
+    return S_OK;
+}
+    m_pReader(pReader),
+    m_pIo(pIo)
+{
+}
+CAsyncOutputPin::~CAsyncOutputPin()
+{
+}
+STDMETHODIMP CAsyncOutputPin::NonDelegatingQueryInterface(REFIID riid, voidppv)
+{
+    CheckPointer(ppv,E_POINTER);
+    if(riid == IID_IAsyncReader)
+    {
+        m_bQueriedForAsyncReader = TRUE;
+        return GetInterface((IAsyncReader) this, ppv);
+    }
+    else
+    {
+        return CBasePin::NonDelegatingQueryInterface(riid, ppv);
+    }
+}
+HRESULT CAsyncOutputPin::GetMediaType(intiPosition,CMediaTypepMediaType)
+{
+    if(iPosition < 0)
+    {
+        return E_INVALIDARG;
+    }
+    if(iPosition > 0)
+    {
+        return VFW_S_NO_MORE_ITEMS;
+    }
+    CheckPointer(pMediaType,E_POINTER); 
+    CheckPointer(m_pReader,E_UNEXPECTED);    
+    pMediaType =m_pReader->LoadType();
+    return S_OK;
+}
+HRESULT CAsyncOutputPin::CheckMediaType(const CMediaType* pType)
+{
+    CAutoLock lck(m_pLock);
+    if((m_pReader->LoadType()->majortype == pType->majortype) 
+       (m_pReader->LoadType()->subtype == MEDIASUBTYPE_NULL 
+        m_pReader->LoadType()->subtype == pType->subtype))
+    {
+        return S_OK;
+    }
+    return S_FALSE;
+}
+HRESULT CAsyncOutputPin::InitAllocator(IMemAllocator **ppAlloc)
+{
+       if(pMemObject == NULL)
+    {
+        return E_OUTOFMEMORY;
+    }
+    if(FAILED(hr))
+    {
+        delete pMemObject;
+        return hr;
+    }
+    hr = pMemObject->QueryInterface(IID_IMemAllocator,(void)ppAlloc);
+    if(FAILED(hr))
+    {
+        delete pMemObject;
+        return E_NOINTERFACE;
+    }
+    ASSERT(*ppAlloc != NULL);
+    return NOERROR;
+}
+CAsyncOutputPin::RequestAllocator(
+    IMemAllocatorpPreferred,
+    ALLOCATOR_PROPERTIESpProps,
+    IMemAllocatorppActual)
+{
+    CheckPointer(pPreferred,E_POINTER);
+    CheckPointer(pProps,E_POINTER);
+    CheckPointer(ppActual,E_POINTER);
+    ASSERT(m_pIo);
+    if(!pProps->cbAlign || !m_pIo->IsAligned(pProps->cbAlign))
+    {
+        m_pIo->Alignment(pProps->cbAlign);
+    }
+    ALLOCATOR_PROPERTIES Actual;
+    HRESULT hr;
+    if(pPreferred)
+    {
+        hr = pPreferred->SetProperties(pProps, Actual);
+        if(SUCCEEDED(hr) m_pIo->IsAligned(Actual.cbAlign))
+        {
+            pPreferred->AddRef();
+            ppActual = pPreferred;
+            return S_OK;
+        }
+    }
